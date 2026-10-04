@@ -60,7 +60,7 @@ export class LiveStrategyExecution implements StrategyExecution {
     state.preparedBuy = undefined;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        if (attempt > 1 && state.prices.currentMarkPrice) {
+        if (attempt > 1 && this.maxEntryMarketCapSol > 0 && state.prices.currentMarkPrice) {
           const currentPrice = state.prices.currentMarkPrice;
           const marketCapSol = entryMarketCapSol(currentPrice);
           if (!isEntryMarketCapAllowed(currentPrice, this.maxEntryMarketCapSol)) {

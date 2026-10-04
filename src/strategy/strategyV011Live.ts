@@ -6,7 +6,7 @@ import type { TokenState } from "../state/tokenState.js";
 import { TokenLifecycleState } from "./state.js";
 import type { Strategy, StrategyExecution } from "./types.js";
 import { StrategyV011Engine, type StrategyDecision, type StrategyMarketEvent } from "./strategyV011Engine.js";
-import { lamportsToSol, slippagePctToBps, solToLamportsNumber, toStrategyPrice } from "./priceUnits.js";
+import { lamportsToSol, solToLamportsNumber, toStrategyPrice } from "./priceUnits.js";
 
 export class StrategyV011Live implements Strategy {
   readonly #engines = new WeakMap<TokenState, StrategyV011Engine>();
@@ -44,18 +44,14 @@ export class StrategyV011Live implements Strategy {
         tsSec: Math.floor(state.targetBuy.timestampMs / 1000),
         wallet: this.targetWallet,
         gateSig: state.targetBuy.signature,
+        tokenAmount: Number(state.targetBuy.tokenAmount),
         nowMs: state.targetBuy.timestampMs
       });
       this.#logDecision(state, bind, "gate");
       this.#syncPool(state, engine, event.slot);
-      if (bind.kind === "skip" || engine.isDone) {
-        this.#markClosed(state, bind.kind === "skip" ? bind.detail : "gate done");
-        return;
-      }
-      // Gate buy itself should not drive entry; subsequent pool events / timers do.
-      if (event.signature === state.targetBuy.signature && event.eventIndex === state.targetBuy.eventIndex) {
-        return;
-      }
+      if (bind.kind === "skip" || engine.isDone) return;
+      // The gate buy starts the clock. Later pool events and timers decide the entry.
+      if (event.signature === state.targetBuy.signature && event.eventIndex === state.targetBuy.eventIndex) return;
     }
     const decision = engine.onEvent(market, holding);
     this.#syncPool(state, engine, event.slot);
@@ -64,12 +60,9 @@ export class StrategyV011Live implements Strategy {
 
   onClock(state: TokenState, nowMs = Date.now()): void {
     const engine = this.#engine(state);
-    if (!engine || engine.isDone) {
-      if (engine) this.#syncPool(state, engine);
-      if (engine?.isDone && !isHolding(state)) this.#markClosed(state, "strategy done");
-      return;
-    }
-    if (!engine.timerWantsTicks()) return;
+    if (!engine) return;
+    this.#syncPool(state, engine);
+    if (engine.isDone || !engine.timerWantsTicks()) return;
     const mark = toStrategyPrice(state.prices.currentMarkPrice ?? 0) || engine.lastMarkPx;
     const decision = engine.onTimer(mark, nowMs);
     this.#syncPool(state, engine);
@@ -83,27 +76,27 @@ export class StrategyV011Live implements Strategy {
     this.#syncPool(state, engine, fill.slot);
   }
 
-  onBuyFailed(state: TokenState): void {
+  onBuyFailed(state: TokenState): { rearm: boolean } {
     const engine = this.#engines.get(state);
-    if (!engine) return;
+    if (!engine) return { rearm: true };
     engine.onBuyFailed();
     state.resetBuySendClaim();
     this.#syncPool(state, engine);
-    if (engine.isDone) this.#markClosed(state, engine.lastSkip || "buy failed");
+    return { rearm: true };
   }
 
   onSellFailed(state: TokenState): void {
-    this.#engines.get(state)?.onSellFailed();
+    this.#engines.get(state)?.onSellFailed(Date.now());
+    const engine = this.#engines.get(state);
+    if (engine) this.#syncPool(state, engine);
   }
 
-  onSellFill(state: TokenState): { thenBuy: boolean } {
+  onSellFill(state: TokenState): { rearm: boolean } {
     const engine = this.#engines.get(state);
-    if (!engine) return { thenBuy: false };
+    if (!engine) return { rearm: true };
     engine.onSellFill();
     this.#syncPool(state, engine);
-    const thenBuy = engine.pendingThenBuy();
-    if (!thenBuy && engine.isDone) this.#markClosed(state, "position closed");
-    return { thenBuy };
+    return { rearm: true };
   }
 
   /** Rehydrate an already-open recovered position into HOLDING. */
@@ -111,25 +104,19 @@ export class StrategyV011Live implements Strategy {
     const engine = this.#engine(state);
     if (!engine) return;
     if (engine.phaseName === "unbound") {
-      const midClip = (this.cfg.clip_lo + this.cfg.clip_hi) / 2;
       const sol = lamportsToSol(state.targetBuy.solAmount);
       engine.bindGateBuy({
         price: toStrategyPrice(state.targetBuy.price || fillPriceLive),
-        sol: sol > 0 ? sol : midClip,
+        sol,
         tsSec: Math.floor((state.targetBuy.timestampMs || Date.now()) / 1000),
         wallet: this.targetWallet,
         gateSig: state.targetBuy.signature,
+        tokenAmount: Number(state.targetBuy.tokenAmount),
         nowMs: state.targetBuy.timestampMs || Date.now()
       });
     }
     engine.onBuyFill(toStrategyPrice(fillPriceLive), Math.floor(Date.now() / 1000), 0);
     this.#syncPool(state, engine);
-  }
-
-  async onThenBuy(state: TokenState): Promise<void> {
-    const engine = this.#engines.get(state);
-    if (!engine) return;
-    await this.#buy(state, engine, engine.lastBuyReason);
   }
 
   #syncPool(state: TokenState, engine: StrategyV011Engine, fromSlot?: number): void {
@@ -150,23 +137,13 @@ export class StrategyV011Live implements Strategy {
 
   async #dispatch(state: TokenState, engine: StrategyV011Engine, decision: StrategyDecision): Promise<void> {
     this.#logDecision(state, decision, "signal");
-    if (decision.kind === "none") return;
-    if (decision.kind === "skip") {
-      if (engine.isDone && !isHolding(state)) this.#markClosed(state, decision.detail);
-      return;
-    }
+    if (decision.kind === "none" || decision.kind === "skip") return;
     if (this.#busy.has(state)) return;
     if (decision.kind === "fire_buy") {
       await this.#buy(state, engine, decision.reason);
       return;
     }
-    if (decision.kind === "fire_sell") {
-      await this.#sell(state, decision.reason);
-      return;
-    }
-    if (decision.kind === "fire_then_buy") {
-      await this.#sell(state, decision.sellReason);
-    }
+    await this.#sell(state, decision.reason);
   }
 
   async #buy(state: TokenState, engine: StrategyV011Engine, reason: string): Promise<void> {
@@ -183,15 +160,9 @@ export class StrategyV011Live implements Strategy {
       const sizeSol = engine.buySizeSol();
       state.buyLamports = solToLamportsNumber(sizeSol);
       state.prices.entrySignalPrice = state.prices.currentMarkPrice || state.targetBuy.price;
-      const scalp = Boolean(engine.lastBuyDiag.scalp);
-      if (scalp) {
-        state.buySlippageBps = slippagePctToBps(this.cfg.rule_2_buy_slippage_pct);
-        state.sellSlippageBps = slippagePctToBps(this.cfg.rule_2_sell_slippage_pct);
-      } else {
-        state.buySlippageBps = this.defaultBuySlippageBps;
-        state.sellSlippageBps = this.defaultSellSlippageBps;
-      }
-      this.logger.info({ mint: state.descriptor.mint, reason, sizeSol, scalp, diag: engine.lastBuyDiag }, "[05 ENTRY] strategy_v_011 buy signal");
+      state.buySlippageBps = this.defaultBuySlippageBps;
+      state.sellSlippageBps = this.defaultSellSlippageBps;
+      this.logger.info({ mint: state.descriptor.mint, reason, sizeSol, diag: engine.lastBuyDiag }, "[05 ENTRY] strategy_v_011 buy signal");
       state.preparedBuy = await state.adapter.buildBuy({
         descriptor: state.descriptor,
         owner: this.wallet.publicKey,
@@ -202,8 +173,11 @@ export class StrategyV011Live implements Strategy {
       await this.execution.sendBuy(state, performance.now());
     } catch (error) {
       this.logger.error({ err: error instanceof Error ? error.message : String(error), mint: state.descriptor.mint }, "[05 ENTRY] strategy_v_011 buy failed");
-      try { state.transition(TokenLifecycleState.FAILED); } catch { /* ignore */ }
       engine.onBuyFailed();
+      state.resetBuySendClaim();
+      try {
+        if (state.lifecycle === TokenLifecycleState.BUY_PREPARED) state.transition(TokenLifecycleState.TRACKING_POOL);
+      } catch { /* ignore */ }
     } finally {
       this.#busy.delete(state);
     }
@@ -220,19 +194,9 @@ export class StrategyV011Live implements Strategy {
     } catch (error) {
       this.logger.error({ err: error instanceof Error ? error.message : String(error), mint: state.descriptor.mint }, "[08 EXIT] strategy_v_011 sell failed");
       state.releaseSellSend();
+      this.onSellFailed(state);
     } finally {
       this.#busy.delete(state);
-    }
-  }
-
-  #markClosed(state: TokenState, reason: string): void {
-    if (state.lifecycle === TokenLifecycleState.CLOSED || state.lifecycle === TokenLifecycleState.FAILED) return;
-    if (isHolding(state) || state.lifecycle === TokenLifecycleState.BUY_PREPARED || state.lifecycle === TokenLifecycleState.BUY_SENT) return;
-    try {
-      state.transition(TokenLifecycleState.CLOSED);
-      this.logger.info({ mint: state.descriptor.mint, reason }, "[CLEANUP] strategy_v_011 finished mint");
-    } catch {
-      /* ignore invalid transitions while in-flight */
     }
   }
 
@@ -259,6 +223,7 @@ function toMarketEvent(event: PoolTradeEvent): StrategyMarketEvent {
     side: event.side === "buy" ? "BUY" : "SELL",
     wallet: event.trader,
     solAmount: lamportsToSol(event.solAmount),
+    tokenAmount: Number(event.tokenAmount),
     price: toStrategyPrice(event.price)
   };
 }

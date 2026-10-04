@@ -80,10 +80,15 @@ const strategyKnobs = Object.fromEntries(config.strategyPlans.map(plan => [plan.
     }
   : {
       targetWallet: config.strategyV011.gate_wallet,
-      rule1SizeSol: config.strategyV011.rule_1_size_sol,
-      rule2Enabled: config.strategyV011.rule_2_enabled,
-      clip: [config.strategyV011.clip_lo, config.strategyV011.clip_hi],
-      mc: [config.strategyV011.min_mc_sol, config.strategyV011.max_mc_sol],
+      sizeSol: config.strategyV011.size_sol,
+      minEntryS: config.strategyV011.min_entry_s,
+      maxEntryS: config.strategyV011.max_entry_s,
+      maxChase: config.strategyV011.max_chase,
+      takeProfit: config.strategyV011.take_profit,
+      dustSol: config.strategyV011.dust_sol,
+      sellHitCount: config.strategyV011.sell_hit_count,
+      sellHitMin: config.strategyV011.sell_hit_min,
+      targetSellExit: config.strategyV011.target_sell_exit,
       timerMs: config.strategyV011.timer_ms
     }
 ]));

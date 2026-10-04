@@ -29,14 +29,13 @@ function strategyPlan(
   strategyV022: ReturnType<typeof loadStrategyV022Config>,
   env: WalletEnv
 ) {
-  const sizeSol = name === "strategy_v_022"
-    ? strategyV022.size_sol
-    : strategyV011.rule_1_enabled ? strategyV011.rule_1_size_sol : strategyV011.rule_2_size_sol;
-  const maxEntryMarketCapSol = name === "strategy_v_022" ? strategyV022.max_mc_sol : strategyV011.max_mc_sol;
+  const sizeSol = name === "strategy_v_022" ? strategyV022.size_sol : strategyV011.size_sol;
+  // strategy_v_011 has no market-cap gate. 0 leaves the buy-retry cap off.
+  const maxEntryMarketCapSol = name === "strategy_v_022" ? strategyV022.max_mc_sol : 0;
   const buyAmountLamports = solToLamports(sizeSol.toFixed(9));
   const targetWallet = name === "strategy_v_022" ? strategyV022.gate_wallet : strategyV011.gate_wallet;
   if (buyAmountLamports <= 0n) throw new Error(`${name} size must be positive`);
-  if (maxEntryMarketCapSol <= 0) throw new Error(`${name} max market cap must be positive`);
+  if (name === "strategy_v_022" && maxEntryMarketCapSol <= 0) throw new Error(`${name} max market cap must be positive`);
   if (targetWallet.trim().length < 32) throw new Error(`${name} gate_wallet is missing`);
   return { name, buyAmountLamports, maxEntryMarketCapSol, targetWallet: targetWallet.trim(), keypair: resolveTradingKeypair(name, env) };
 }
