@@ -23,6 +23,9 @@ export const envSchema = z.object({
   /** Fernet ciphertext of XOR(private_key) for strategy_v_022. */
   STRATEGY_V_022_PRIVATE_KEY_ENCRYPTED: z.string().optional().default(""),
   STRATEGY_V_022_PRIVATE_KEY_BASE58: z.string().optional().default(""),
+  /** Fernet ciphertext of XOR(private_key) for strategy_v_031. */
+  STRATEGY_V_031_PRIVATE_KEY_ENCRYPTED: z.string().optional().default(""),
+  STRATEGY_V_031_PRIVATE_KEY_BASE58: z.string().optional().default(""),
   PRIORITY_FEE_LAMPORTS: integer(1),
   HELIUS_TIP_LAMPORTS: integer(5000).default(5000),
   COMPUTE_UNIT_LIMIT: integer(1),
@@ -47,11 +50,12 @@ export const envSchema = z.object({
   }
 });
 
-export function strategyWalletFields(name: StrategyName): {
-  encrypted: "STRATEGY_V_011_PRIVATE_KEY_ENCRYPTED" | "STRATEGY_V_022_PRIVATE_KEY_ENCRYPTED";
-  plain: "STRATEGY_V_011_PRIVATE_KEY_BASE58" | "STRATEGY_V_022_PRIVATE_KEY_BASE58";
-} {
-  return name === "strategy_v_022"
-    ? { encrypted: "STRATEGY_V_022_PRIVATE_KEY_ENCRYPTED", plain: "STRATEGY_V_022_PRIVATE_KEY_BASE58" }
-    : { encrypted: "STRATEGY_V_011_PRIVATE_KEY_ENCRYPTED", plain: "STRATEGY_V_011_PRIVATE_KEY_BASE58" };
+const STRATEGY_WALLET_FIELDS = {
+  strategy_v_011: { encrypted: "STRATEGY_V_011_PRIVATE_KEY_ENCRYPTED", plain: "STRATEGY_V_011_PRIVATE_KEY_BASE58" },
+  strategy_v_022: { encrypted: "STRATEGY_V_022_PRIVATE_KEY_ENCRYPTED", plain: "STRATEGY_V_022_PRIVATE_KEY_BASE58" },
+  strategy_v_031: { encrypted: "STRATEGY_V_031_PRIVATE_KEY_ENCRYPTED", plain: "STRATEGY_V_031_PRIVATE_KEY_BASE58" }
+} as const;
+
+export function strategyWalletFields(name: StrategyName): (typeof STRATEGY_WALLET_FIELDS)[StrategyName] {
+  return STRATEGY_WALLET_FIELDS[name];
 }

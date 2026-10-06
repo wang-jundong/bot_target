@@ -12,6 +12,7 @@ import { PnlJournal } from "./pnl/pnlJournal.js";
 import { TradingRuntime } from "./runtime.js";
 import { StrategyV011Live } from "./strategy/strategyV011Live.js";
 import { StrategyV022Live } from "./strategy/strategyV022Live.js";
+import { StrategyV031Live } from "./strategy/strategyV031Live.js";
 import type { Strategy } from "./strategy/types.js";
 import { PumpBondingCurveAdapter, PumpSwapAdapter } from "./venues/pumpAdapters.js";
 import { PumpTradeDecoder } from "./venues/tradeDecoder.js";
@@ -57,7 +58,9 @@ const strategies = config.strategyPlans.map(plan => {
   );
   const strategy: Strategy = plan.name === "strategy_v_022"
     ? new StrategyV022Live(config.strategyV022, execution, plan.keypair, plan.targetWallet, config.buySlippageBps, config.sellSlippageBps, canOpen, logger)
-    : new StrategyV011Live(config.strategyV011, execution, plan.keypair, plan.targetWallet, config.buySlippageBps, config.sellSlippageBps, canOpen, logger);
+    : plan.name === "strategy_v_031"
+      ? new StrategyV031Live(config.strategyV031, execution, plan.keypair, plan.targetWallet, config.buySlippageBps, config.sellSlippageBps, canOpen, logger)
+      : new StrategyV011Live(config.strategyV011, execution, plan.keypair, plan.targetWallet, config.buySlippageBps, config.sellSlippageBps, canOpen, logger);
   execution.bindStrategy(strategy);
   return { name: plan.name, strategy, buyAmountLamports: plan.buyAmountLamports, targetWallet: plan.targetWallet, owner: plan.keypair.publicKey };
 });
@@ -78,19 +81,36 @@ const strategyKnobs = Object.fromEntries(config.strategyPlans.map(plan => [plan.
       stopLoss: config.strategyV022.stop_loss,
       targetSellExit: config.strategyV022.target_sell_exit
     }
-  : {
-      targetWallet: config.strategyV011.gate_wallet,
-      sizeSol: config.strategyV011.size_sol,
-      minEntryS: config.strategyV011.min_entry_s,
-      maxEntryS: config.strategyV011.max_entry_s,
-      maxChase: config.strategyV011.max_chase,
-      takeProfit: config.strategyV011.take_profit,
-      dustSol: config.strategyV011.dust_sol,
-      sellHitCount: config.strategyV011.sell_hit_count,
-      sellHitMin: config.strategyV011.sell_hit_min,
-      targetSellExit: config.strategyV011.target_sell_exit,
-      timerMs: config.strategyV011.timer_ms
-    }
+  : plan.name === "strategy_v_031"
+    ? {
+        targetWallet: config.strategyV031.gate_wallet,
+        sizeSol: config.strategyV031.size_sol,
+        dustSol: config.strategyV031.dust_sol,
+        minEntryS: config.strategyV031.min_entry_s,
+        maxEntryS: config.strategyV031.max_entry_s,
+        buyHitCount: config.strategyV031.buy_hit_count,
+        buyHitMin: config.strategyV031.buy_hit_min,
+        sellHitCount: config.strategyV031.sell_hit_count,
+        sellHitMin: config.strategyV031.sell_hit_min,
+        takeProfit: config.strategyV031.take_profit,
+        maxHoldS: config.strategyV031.max_hold_s,
+        targetSellExit: config.strategyV031.target_sell_exit,
+        firstCycleOnly: config.strategyV031.first_cycle_only,
+        repeatEntries: config.strategyV031.repeat_entries
+      }
+    : {
+        targetWallet: config.strategyV011.gate_wallet,
+        sizeSol: config.strategyV011.size_sol,
+        minEntryS: config.strategyV011.min_entry_s,
+        maxEntryS: config.strategyV011.max_entry_s,
+        maxChase: config.strategyV011.max_chase,
+        takeProfit: config.strategyV011.take_profit,
+        dustSol: config.strategyV011.dust_sol,
+        sellHitCount: config.strategyV011.sell_hit_count,
+        sellHitMin: config.strategyV011.sell_hit_min,
+        targetSellExit: config.strategyV011.target_sell_exit,
+        timerMs: config.strategyV011.timer_ms
+      }
 ]));
 
 logger.info({
