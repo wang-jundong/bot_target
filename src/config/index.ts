@@ -2,7 +2,7 @@ import "dotenv/config";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 import { envSchema, strategyWalletFields } from "./schema.js";
-import { ACTIVE_STRATEGY, selectedStrategyNames, type StrategyName, TRADE } from "./trade.js";
+import { selectedStrategyNames, type StrategyName, TRADE } from "./trade.js";
 import { loadStrategyV011Config } from "./strategyV011.js";
 import { loadStrategyV022Config } from "./strategyV022.js";
 import { loadStrategyV031Config } from "./strategyV031.js";
@@ -65,7 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const strategyV011 = loadStrategyV011Config();
   const strategyV022 = loadStrategyV022Config();
   const strategyV031 = loadStrategyV031Config();
-  const strategy = ACTIVE_STRATEGY;
+  const strategy = selectedStrategyNames().join(", ");
   const strategyPlans = selectedStrategyNames().map(name => strategyPlan(name, strategyV011, strategyV022, strategyV031, value));
   return Object.freeze({
     ...value,
