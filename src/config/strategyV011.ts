@@ -15,7 +15,7 @@ export interface StrategyV011Config {
   sell_hit_count: number;
   /** Those buys must sum to at least this many SOL. */
   sell_hit_min: number;
-  /** Exit when the target sells at least 95% of the tokens still held. */
+  /** Exit when the target sells at least 80% of the tokens still held. */
   target_sell_exit: boolean;
   /** Live position size in SOL. */
   size_sol: number;

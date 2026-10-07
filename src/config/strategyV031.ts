@@ -18,7 +18,7 @@ export interface StrategyV031Config {
   take_profit: number;
   /** Sell a position still open this many seconds after the fill. 0 disables it. */
   max_hold_s: number;
-  /** Exit when the target sells at least 95% of the tokens still held. */
+  /** Exit when the target sells at least 80% of the tokens still held. */
   target_sell_exit: boolean;
   /** After this bag's first max sell, a later target buy does not start another cycle. */
   first_cycle_only: boolean;

@@ -12,7 +12,7 @@
  * with the ones still in the run.
  * The exit is one sliding window of `sell_hit_count` buys summing to `sell_hit_min`,
  * a take-profit versus the fill, `max_hold_s` after the fill, or the target's max sell.
- * A max sell clears the tokens the target still holds (at least 95% of that bag).
+ * A max sell clears the tokens the target still holds (at least 80% of that bag).
  * `first_cycle_only` never starts another cycle after that max sell.
  * `repeat_entries` goes back to looking for a buy on the same clock after a flat
  * exit or a failed buy. The first max sell still ends that search.
@@ -35,7 +35,7 @@ const SIDE_BUY = 1;
 const SIDE_SELL = 2;
 
 /** A target sell is the max sell when it takes at least this share of the tokens still held. */
-const MAX_SELL_FRAC = 0.95;
+const MAX_SELL_FRAC = 0.80;
 
 const PHASE_NAMES = ["idle", "seek_sell", "pending", "hold", "wait", "done"] as const;
 /** After a failed sell, wait before resubmitting so a quiet market is not hammered every tick. */

@@ -9,7 +9,7 @@
  * Dust prints are skipped and do not break the run. The other side does.
  * The exit is one round of `sell_hit_count` buys summing to `sell_hit_min`,
  * a take-profit, a loss cut, or the target's max sell.
- * A max sell clears the tokens the target still holds (at least 95% of that bag).
+ * A max sell clears the tokens the target still holds (at least 80% of that bag).
  * That exit is kept by chain order, including one that arrives while idle.
  * The next target buy opens a round only when it lands strictly after that sell.
  * A smaller partial sell does not, and it still counts as a market print.
@@ -31,7 +31,7 @@ const SIDE_BUY = 1;
 const SIDE_SELL = 2;
 
 /** A target sell is the max sell when it takes at least this share of the tokens still held. */
-const MAX_SELL_FRAC = 0.95;
+const MAX_SELL_FRAC = 0.80;
 
 const PHASE_NAMES = ["idle", "seek_sell", "pending", "hold", "wait"] as const;
 /** After a failed sell, wait before resubmitting so a quiet market is not hammered every tick. */

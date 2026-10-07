@@ -16,7 +16,7 @@ export const PHASE_HOLDING = "holding";
 export const PHASE_DONE = "done";
 
 /** A target sell is the max sell when it takes at least this share of the tokens still held. */
-const MAX_SELL_FRAC = 0.95;
+const MAX_SELL_FRAC = 0.80;
 /** After a failed sell, wait before resubmitting so a still-true signal is not hammered every tick. */
 const SELL_RETRY_MS = 2_000;
 
