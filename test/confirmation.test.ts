@@ -23,4 +23,18 @@ describe("confirmation polling", () => {
     const failed = new ConfirmationTracker({ getSignatureStatuses: vi.fn().mockResolvedValue({ value: [{ err: { InstructionError: [0, "Custom"] }, confirmationStatus: "processed" }] }) } as unknown as Connection);
     await expect(failed.waitProcessed("sig", adapter, owner, "mint")).rejects.toThrow("transaction failed");
   });
+
+  it("stops when a fallback signature is never seen", async () => {
+    const getSignatureStatuses = vi.fn().mockResolvedValue({ value: [null] });
+    const tracker = new ConfirmationTracker({ getSignatureStatuses } as unknown as Connection, 30_000);
+    await expect(tracker.waitProcessed("sig", adapter, owner, "mint", 0)).rejects.toMatchObject({ seen: false });
+    expect(getSignatureStatuses).toHaveBeenCalledOnce();
+  });
+
+  it("keeps polling a signature the cluster has already seen", async () => {
+    const getSignatureStatuses = vi.fn().mockResolvedValue({ value: [{ err: null, confirmationStatus: "processed" }] });
+    const tracker = new ConfirmationTracker({ getSignatureStatuses } as unknown as Connection, 600);
+    await expect(tracker.waitProcessed("sig", adapter, owner, "mint", 0)).rejects.toMatchObject({ seen: true });
+    expect(getSignatureStatuses.mock.calls.length).toBeGreaterThan(1);
+  });
 });

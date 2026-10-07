@@ -6,7 +6,7 @@ import { TokenLifecycleState } from "../strategy/state.js";
 import type { TokenState } from "../state/tokenState.js";
 import type { BlockhashManager } from "./blockhashManager.js";
 import { ConfirmationTimeoutError, type ConfirmationTracker } from "./confirmationTracker.js";
-import type { HeliusSender, SenderTiming } from "../helius/sender.js";
+import { HeliusSenderUnavailableError, type HeliusSender, type SenderTiming } from "../helius/sender.js";
 import type { RecoveryJournal } from "../recovery/journal.js";
 import { isNonRetryableBuyError } from "./buyRetryPolicy.js";
 import type { PnlJournal } from "../pnl/pnlJournal.js";
@@ -78,7 +78,7 @@ export class LiveStrategyExecution implements StrategyExecution {
         const submitted = await this.#submit(transaction, signalMonoMs);
         state.buySignature = submitted.signature;
         this.#record(state, "buy_sent", { attempt, signature: submitted.signature, timing: submitted.timing });
-        const fill = await this.#confirm(submitted.signature, state);
+        const fill = await this.#confirm(submitted.signature, state, submitted.fallback);
         if (!fill.success || fill.tokenAmount <= 0n) throw new Error("buy fill could not be determined");
         state.transition(TokenLifecycleState.BUY_SENT);
         state.actualTokenAmount = fill.tokenAmount;
@@ -119,7 +119,7 @@ export class LiveStrategyExecution implements StrategyExecution {
         const submitted = await this.#submit(transaction, signalMonoMs);
         state.sellSignature = submitted.signature;
         this.#record(state, "sell_sent", { attempt, reason, signature: submitted.signature, timing: submitted.timing });
-        const fill = await this.#confirm(submitted.signature, state);
+        const fill = await this.#confirm(submitted.signature, state, submitted.fallback);
         if (!fill.success) throw new Error("sell fill could not be determined");
         state.transition(TokenLifecycleState.SELL_SENT);
         state.prices.actualExitFillPrice = fill.price;
@@ -175,29 +175,35 @@ export class LiveStrategyExecution implements StrategyExecution {
     this.#sellFailed(state, reason, lastError);
   }
 
-  async #confirm(signature: string, state: TokenState) {
+  async #confirm(signature: string, state: TokenState, fallback = false) {
+    // RPC fallback after a dead sender often returns a signature the cluster never sees. Don't sit on it.
+    const unseenTimeoutMs = fallback ? 10_000 : undefined;
     for (let poll = 1; poll <= 3; poll++) {
-      try { return await this.confirmations.waitProcessed(signature, state.adapter, this.wallet.publicKey, state.descriptor.mint); }
-      catch (error) { if (!(error instanceof ConfirmationTimeoutError) || poll === 3) throw error; this.logger.warn({ poll, signature }, "[06 CONFIRM] Transaction pending; polling same signature"); }
+      try { return await this.confirmations.waitProcessed(signature, state.adapter, this.wallet.publicKey, state.descriptor.mint, unseenTimeoutMs); }
+      catch (error) {
+        if (!(error instanceof ConfirmationTimeoutError) || !error.seen || poll === 3) throw error;
+        this.logger.warn({ poll, signature }, "[06 CONFIRM] Transaction pending; polling same signature");
+      }
     }
-    throw new ConfirmationTimeoutError(`confirmation timed out for ${signature}`);
+    throw new ConfirmationTimeoutError(`confirmation timed out for ${signature}`, false);
   }
 
-  async #submit(transaction: VersionedTransaction, signalMonoMs: number): Promise<{ signature: string; timing: SenderTiming }> {
+  async #submit(transaction: VersionedTransaction, signalMonoMs: number): Promise<{ signature: string; timing: SenderTiming; fallback: boolean }> {
     const serialized = transaction.serialize();
     const base64 = Buffer.from(serialized).toString("base64");
     let lastError: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      try { return await this.sender.send(base64, signalMonoMs); }
+      try { return { ...(await this.sender.send(base64, signalMonoMs)), fallback: false }; }
       catch (error) {
         lastError = error;
         this.logger.warn({ attempt, err: error instanceof Error ? error.message : String(error) }, "[06 CONFIRM] Helius submission attempt failed");
+        if (error instanceof HeliusSenderUnavailableError) break;
       }
     }
     const sendStartMonoMs = performance.now();
     try {
       const signature = await this.connection.sendRawTransaction(serialized, { skipPreflight: false, maxRetries: 2 });
-      return { signature, timing: { signalMonoMs, sendStartMonoMs, responseMonoMs: performance.now() } };
+      return { signature, timing: { signalMonoMs, sendStartMonoMs, responseMonoMs: performance.now() }, fallback: true };
     } catch (fallbackError) {
       throw new AggregateError([lastError, fallbackError], "Sender and RPC fallback both failed");
     }

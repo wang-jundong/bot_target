@@ -28,12 +28,14 @@ const YellowstoneClient = (require("@triton-one/yellowstone-grpc") as {
 const RECONNECT_MS = 2_000;
 const IDLE_MS = 300_000;
 
+/** Replay slot Vibe will not serve. Retrying it on the next connect drops the stream again. */
 function isReplayRejected(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
-  const { code, message } = error as { code?: unknown; message?: unknown };
-  if (code === 11 || code === 13) return true;
-  if (typeof message !== "string") return false;
-  return /\bOUT_OF_RANGE\b/.test(message) || /failed to get replay response/.test(message);
+  const { code, message, details } = error as { code?: unknown; message?: unknown; details?: unknown };
+  const text = [message, details].filter((part): part is string => typeof part === "string").join(" ");
+  if (code === 11 || /\bOUT_OF_RANGE\b/.test(text)) return true;
+  // Status 13. Vibe's replay backend failed; the shared stream is already dead.
+  return /failed to get replay response/i.test(text);
 }
 
 export class YellowstoneVibeClient implements VibeClient {
@@ -49,6 +51,8 @@ export class YellowstoneVibeClient implements VibeClient {
   #lastSlot = 0;
   /** Next live filter write replays from this slot, then clears it. Ping writes do not. */
   #reconnectFromSlot?: number;
+  /** True after this stream has accepted a filter. A later fromSlot has to be a new stream. */
+  #filterWritten = false;
   /** Pool catch-up slot. Served on a side stream so a replay failure cannot drop wallet delivery. */
   #catchupSlot?: number;
 
@@ -148,9 +152,7 @@ export class YellowstoneVibeClient implements VibeClient {
     const stream = await this.#client.subscribe();
     this.#stream = stream;
     const disconnected = (error?: unknown): void => {
-      if (this.#stream !== stream) return;
-      this.#stream = undefined;
-      this.#clearIdle();
+      if (!this.#detach(stream)) return;
       this.#dropReplay();
       if (isReplayRejected(error)) {
         // Vibe cannot serve this replay. Asking for the same slot again loops the stream.
@@ -176,7 +178,10 @@ export class YellowstoneVibeClient implements VibeClient {
     this.#armIdle();
     try { await this.#writeSubscription(); }
     catch (error) {
-      if (this.#stream === stream) this.#stream = undefined;
+      if (this.#stream === stream) {
+        this.#stream = undefined;
+        this.#filterWritten = false;
+      }
       this.#clearIdle();
       stream.cancel();
       throw error;
@@ -244,6 +249,14 @@ export class YellowstoneVibeClient implements VibeClient {
     if (!stream) return;
     const fromSlot = ping ? undefined : this.#reconnectFromSlot;
     if (!ping) this.#reconnectFromSlot = undefined;
+    // Vibe returns 13 INTERNAL when fromSlot is written onto an open stream, and that kills every subscription.
+    if (fromSlot && this.#filterWritten) {
+      this.#armReconnect(fromSlot);
+      this.#detach(stream);
+      stream.cancel();
+      this.#scheduleReconnect(0);
+      return;
+    }
     try {
       await this.#write(stream, this.#request(fromSlot, ping));
     } catch (error) {
@@ -252,6 +265,7 @@ export class YellowstoneVibeClient implements VibeClient {
       this.onError(error);
       await this.#write(stream, this.#request(undefined, ping));
     }
+    if (!ping) this.#filterWritten = true;
   }
 
   #write(stream: Stream, request: SubscribeRequest): Promise<void> {
@@ -263,7 +277,7 @@ export class YellowstoneVibeClient implements VibeClient {
     this.#idleTimer = setTimeout(() => {
       if (this.#closing || !this.#stream) return;
       const stream = this.#stream;
-      this.#stream = undefined;
+      if (!this.#detach(stream)) return;
       this.#armReconnect(this.#lastSlot);
       stream.cancel();
       this.onError(new Error(`Vibe stream idle for ${IDLE_MS / 1000}s`));
@@ -277,12 +291,20 @@ export class YellowstoneVibeClient implements VibeClient {
     this.#idleTimer = undefined;
   }
 
-  #scheduleReconnect(): void {
+  #detach(stream: Stream): boolean {
+    if (this.#stream !== stream) return false;
+    this.#stream = undefined;
+    this.#filterWritten = false;
+    this.#clearIdle();
+    return true;
+  }
+
+  #scheduleReconnect(delayMs = RECONNECT_MS): void {
     if (this.#closing || this.#handlers.size === 0 || this.#retryTimers.size > 0) return;
     const timer = setTimeout(() => {
       this.#retryTimers.delete(timer);
       void this.#ensureStream().catch(error => { this.onError(error); this.#scheduleReconnect(); });
-    }, RECONNECT_MS);
+    }, delayMs);
     this.#retryTimers.add(timer);
   }
 
@@ -295,6 +317,7 @@ export class YellowstoneVibeClient implements VibeClient {
     this.#dropReplay();
     const stream = this.#stream;
     this.#stream = undefined;
+    this.#filterWritten = false;
     stream?.cancel();
     this.#client.close?.();
   }
