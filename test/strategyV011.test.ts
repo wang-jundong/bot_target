@@ -223,4 +223,23 @@ describe("strategy_v_011 engine", () => {
     const decision = engine.onTimer(60e-9, rearmAt + (config.min_entry_s + 0.5) * 1000);
     expect(decision.kind).toBe("fire_buy");
   });
+
+  it("sells after the fill when the target max-sold while the buy was in flight", () => {
+    const engine = new StrategyV011Engine(cfg());
+    expect(enter(engine).kind).toBe("fire_buy");
+    const sold = engine.onEvent(event({
+      side: "SELL",
+      wallet: "target",
+      signature: "dump",
+      tokenAmount: 1_000_000,
+      solAmount: 3,
+      timestampMs: T0 + 6_000
+    }), false);
+    expect(sold.kind).toBe("none");
+    expect(engine.phaseName).toBe(PHASE_WATCHING);
+    const reason = engine.onBuyFill(50e-9, 1_700_000_006, 10);
+    expect(reason).toContain("target_sell");
+    expect(engine.phaseName).toBe(PHASE_HOLDING);
+    expect(engine.lastSellReason).toContain("target_sell");
+  });
 });

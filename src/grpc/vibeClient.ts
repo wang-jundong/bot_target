@@ -28,10 +28,12 @@ const YellowstoneClient = (require("@triton-one/yellowstone-grpc") as {
 const RECONNECT_MS = 2_000;
 const IDLE_MS = 300_000;
 
-function isReplayOutOfRange(error: unknown): boolean {
+function isReplayRejected(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const { code, message } = error as { code?: unknown; message?: unknown };
-  return code === 11 || (typeof message === "string" && /\bOUT_OF_RANGE\b/.test(message));
+  if (code === 11 || code === 13) return true;
+  if (typeof message !== "string") return false;
+  return /\bOUT_OF_RANGE\b/.test(message) || /failed to get replay response/.test(message);
 }
 
 export class YellowstoneVibeClient implements VibeClient {
@@ -39,13 +41,16 @@ export class YellowstoneVibeClient implements VibeClient {
   readonly #handlers = new Map<string, Set<(tx: ParsedTargetTransaction) => void>>();
   readonly #retryTimers = new Set<NodeJS.Timeout>();
   #stream?: Stream;
+  #replayStream?: Stream;
   #opening?: Promise<void>;
   #writeQueue: Promise<void> = Promise.resolve();
   #idleTimer?: NodeJS.Timeout;
   #closing = false;
   #lastSlot = 0;
-  /** Next filter write replays from this slot, then clears it. Ping writes do not. */
-  #replayFromSlot?: number;
+  /** Next live filter write replays from this slot, then clears it. Ping writes do not. */
+  #reconnectFromSlot?: number;
+  /** Pool catch-up slot. Served on a side stream so a replay failure cannot drop wallet delivery. */
+  #catchupSlot?: number;
 
   constructor(options: VibeConnectionOptions, private readonly onError: (error: unknown) => void = console.error, client?: YellowstoneClientApi) {
     this.#client = client ?? new YellowstoneClient(options.endpoint, options.token || undefined, {
@@ -70,7 +75,7 @@ export class YellowstoneVibeClient implements VibeClient {
     let handlers = this.#handlers.get(account);
     if (!handlers) { handlers = new Set(); this.#handlers.set(account, handlers); }
     handlers.add(onTransaction);
-    this.#armReplay(fromSlot);
+    this.#armCatchup(fromSlot);
     while (!this.#closing) {
       try {
         await this.#ensureStream();
@@ -80,6 +85,10 @@ export class YellowstoneVibeClient implements VibeClient {
         this.onError(error);
         await new Promise<void>(resolve => setTimeout(resolve, RECONNECT_MS));
       }
+    }
+    if (!this.#closing && this.#catchupSlot) {
+      try { await this.#openReplay(); }
+      catch (error) { this.onError(error); }
     }
     if (this.#closing) {
       handlers.delete(onTransaction);
@@ -99,9 +108,22 @@ export class YellowstoneVibeClient implements VibeClient {
     };
   }
 
-  #armReplay(slot?: number): void {
+  #armReconnect(slot?: number): void {
     if (slot === undefined || !Number.isFinite(slot) || slot <= 0) return;
-    if (this.#replayFromSlot === undefined || slot < this.#replayFromSlot) this.#replayFromSlot = slot;
+    if (this.#reconnectFromSlot === undefined || slot < this.#reconnectFromSlot) this.#reconnectFromSlot = slot;
+  }
+
+  #armCatchup(slot?: number): void {
+    if (slot === undefined || !Number.isFinite(slot) || slot <= 0) return;
+    if (this.#catchupSlot !== undefined && slot >= this.#catchupSlot) return;
+    this.#catchupSlot = slot;
+    if (this.#replayStream) this.#dropReplay();
+  }
+
+  #dropReplay(): void {
+    const stream = this.#replayStream;
+    this.#replayStream = undefined;
+    stream?.cancel();
   }
 
   #request(fromSlot?: number, ping = false): SubscribeRequest {
@@ -129,34 +151,24 @@ export class YellowstoneVibeClient implements VibeClient {
       if (this.#stream !== stream) return;
       this.#stream = undefined;
       this.#clearIdle();
-      if (isReplayOutOfRange(error)) {
-        // Vibe rejected this replay slot asynchronously. Retrying it would loop forever.
-        this.#replayFromSlot = undefined;
+      this.#dropReplay();
+      if (isReplayRejected(error)) {
+        // Vibe cannot serve this replay. Asking for the same slot again loops the stream.
+        this.#reconnectFromSlot = undefined;
+        this.#catchupSlot = undefined;
         this.#lastSlot = 0;
       } else {
-        this.#armReplay(this.#lastSlot);
+        this.#armReconnect(this.#lastSlot);
       }
       if (error) this.onError(error);
       this.#scheduleReconnect();
     };
     stream.on("data", update => {
-      this.#armIdle();
       if (update.ping) {
         void this.#writeSubscription(true).catch(error => this.onError(error));
         return;
       }
-      const info = update.transaction?.transaction;
-      const message = info?.transaction?.message;
-      if (!info || !message || info.meta?.err) return;
-      const slot = Number(update.transaction!.slot);
-      if (slot > this.#lastSlot) this.#lastSlot = slot;
-      const accountKeys = [...message.accountKeys, ...(info.meta?.loadedWritableAddresses ?? []), ...(info.meta?.loadedReadonlyAddresses ?? [])].map(key => bs58.encode(key));
-      const programIds = message.instructions.map(ix => accountKeys[ix.programIdIndex]).filter((key): key is string => key !== undefined);
-      const transaction = { signature: bs58.encode(info.signature), slot, timestampMs: Date.now(), accountKeys, programIds, raw: info };
-      for (const account of accountKeys) {
-        const handler = this.#handlers.get(account)?.values().next().value;
-        if (handler) { handler(transaction); break; }
-      }
+      this.#onData(update);
     });
     stream.on("error", error => disconnected(error));
     stream.on("end", () => disconnected(new Error("Vibe shared stream ended")));
@@ -171,6 +183,56 @@ export class YellowstoneVibeClient implements VibeClient {
     }
   }
 
+  /** Pool history on its own stream. A failure here leaves the live wallet stream up. */
+  async #openReplay(): Promise<void> {
+    const from = this.#catchupSlot;
+    if (!from || this.#replayStream || this.#closing) return;
+    const until = Math.max(this.#lastSlot, from);
+    const stream = await this.#client.subscribe();
+    if (this.#closing || this.#replayStream || this.#catchupSlot !== from) {
+      stream.cancel();
+      return;
+    }
+    this.#replayStream = stream;
+    const stop = (error?: unknown): void => {
+      if (this.#replayStream !== stream) return;
+      this.#replayStream = undefined;
+      this.#catchupSlot = undefined;
+      stream.cancel();
+      if (error && !this.#closing) this.onError(error);
+    };
+    stream.on("data", update => {
+      if (update.ping) return;
+      this.#onData(update);
+      const slot = Number(update.transaction?.slot ?? 0);
+      if (slot >= until) stop();
+    });
+    stream.on("error", error => stop(error));
+    stream.on("end", () => stop(new Error("Vibe replay stream ended")));
+    stream.on("close", () => stop());
+    try {
+      await this.#write(stream, this.#request(from));
+    } catch (error) {
+      stop(error);
+    }
+  }
+
+  #onData(update: SubscribeUpdate): void {
+    this.#armIdle();
+    const info = update.transaction?.transaction;
+    const message = info?.transaction?.message;
+    if (!info || !message || info.meta?.err) return;
+    const slot = Number(update.transaction!.slot);
+    if (slot > this.#lastSlot) this.#lastSlot = slot;
+    const accountKeys = [...message.accountKeys, ...(info.meta?.loadedWritableAddresses ?? []), ...(info.meta?.loadedReadonlyAddresses ?? [])].map(key => bs58.encode(key));
+    const programIds = message.instructions.map(ix => accountKeys[ix.programIdIndex]).filter((key): key is string => key !== undefined);
+    const transaction = { signature: bs58.encode(info.signature), slot, timestampMs: Date.now(), accountKeys, programIds, raw: info };
+    for (const account of accountKeys) {
+      const handler = this.#handlers.get(account)?.values().next().value;
+      if (handler) { handler(transaction); break; }
+    }
+  }
+
   #writeSubscription(ping = false): Promise<void> {
     const run = this.#writeQueue.then(() => this.#writeOnce(ping));
     this.#writeQueue = run.then(() => undefined, () => undefined);
@@ -180,13 +242,13 @@ export class YellowstoneVibeClient implements VibeClient {
   async #writeOnce(ping: boolean): Promise<void> {
     const stream = this.#stream;
     if (!stream) return;
-    const fromSlot = ping ? undefined : this.#replayFromSlot;
-    if (!ping) this.#replayFromSlot = undefined;
+    const fromSlot = ping ? undefined : this.#reconnectFromSlot;
+    if (!ping) this.#reconnectFromSlot = undefined;
     try {
       await this.#write(stream, this.#request(fromSlot, ping));
     } catch (error) {
       if (!fromSlot) throw error;
-      if (isReplayOutOfRange(error)) this.#lastSlot = 0;
+      if (isReplayRejected(error)) this.#lastSlot = 0;
       this.onError(error);
       await this.#write(stream, this.#request(undefined, ping));
     }
@@ -202,7 +264,7 @@ export class YellowstoneVibeClient implements VibeClient {
       if (this.#closing || !this.#stream) return;
       const stream = this.#stream;
       this.#stream = undefined;
-      this.#armReplay(this.#lastSlot);
+      this.#armReconnect(this.#lastSlot);
       stream.cancel();
       this.onError(new Error(`Vibe stream idle for ${IDLE_MS / 1000}s`));
       this.#scheduleReconnect();
@@ -230,8 +292,10 @@ export class YellowstoneVibeClient implements VibeClient {
     this.#retryTimers.clear();
     this.#clearIdle();
     this.#handlers.clear();
-    this.#stream?.cancel();
+    this.#dropReplay();
+    const stream = this.#stream;
     this.#stream = undefined;
+    stream?.cancel();
     this.#client.close?.();
   }
 }

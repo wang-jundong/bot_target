@@ -61,6 +61,8 @@ export class StrategyV011Engine {
   private exitInFlight = false;
   private exitRetry = false;
   private sellRetryAtMs = 0;
+  /** Target max-sold after the buy was fired and before the fill. The fill still has to exit. */
+  private missedTargetSell = false;
   private targetWallet = "";
 
   private _lastBuyReason = "";
@@ -140,19 +142,29 @@ export class StrategyV011Engine {
     ));
   }
 
-  onBuyFill(fillPrice: number, _fillTsSec: number, _fillSlot: number): void {
+  /**
+   * Returns a sell reason when the target already max-sold while this buy was in flight.
+   * The fill still opens the position; the caller sells it immediately.
+   */
+  onBuyFill(fillPrice: number, _fillTsSec: number, _fillSlot: number): string | null {
+    const missed = this.missedTargetSell && this.cfg.target_sell_exit;
+    this.missedTargetSell = false;
     this.entryPrice = fillPrice;
     this.peakPrice = fillPrice;
     this.phase = PHASE_HOLDING;
-    this.exitInFlight = false;
+    this.exitInFlight = missed;
     this.exitRetry = false;
     this.sellRetryAtMs = 0;
     this.sellPrints = [];
     if (fillPrice > 0) this.notePrice(fillPrice);
+    if (!missed) return null;
+    this._lastSellReason = "target_sell — gate max sell before fill";
+    return this._lastSellReason;
   }
 
   onBuyFailed(): void {
     this.entryPrice = 0;
+    this.missedTargetSell = false;
     this.exitInFlight = false;
     this.exitRetry = false;
     this.phase = PHASE_DONE;
@@ -287,6 +299,8 @@ export class StrategyV011Engine {
 
   private abortSoldMax(): StrategyDecision | null {
     if (!this.targetMaxSold) return null;
+    // The buy is already submitted. Aborting the cycle must not forget the exit once the fill lands.
+    if (this.cfg.target_sell_exit && this.entryDone && this.entryPrice <= 0) this.missedTargetSell = true;
     this.aborted = true;
     this.entryDone = true;
     this.phase = PHASE_DONE;
@@ -308,6 +322,7 @@ export class StrategyV011Engine {
     this.peakPrice = 0;
     this.exitInFlight = false;
     this.exitRetry = false;
+    this.missedTargetSell = false;
     this.sellPrints = [];
     this._lastMarkPx = price > 0 ? price : 0;
     if (price > 0) this.notePrice(price);
@@ -431,7 +446,11 @@ export class StrategyV011Engine {
 
     this.noteTargetBag(event);
     if (event.price > 0) this.notePrice(event.price);
-    if (this.entryDone && !this.aborted && this.entryPrice <= 0) return this.none();
+    if (this.entryDone && !this.aborted && this.entryPrice <= 0) {
+      // The buy is in flight, so this print cannot sell yet. Remember a max sell for the fill.
+      if (this.cfg.target_sell_exit && this.targetMaxSold) this.missedTargetSell = true;
+      return this.none();
+    }
     if (this.phase === PHASE_WATCHING) {
       const aborted = this.abortSoldMax();
       if (aborted) return aborted;

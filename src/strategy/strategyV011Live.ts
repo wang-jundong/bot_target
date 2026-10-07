@@ -11,6 +11,7 @@ import { lamportsToSol, solToLamportsNumber, toStrategyPrice } from "./priceUnit
 export class StrategyV011Live implements Strategy {
   readonly #engines = new WeakMap<TokenState, StrategyV011Engine>();
   readonly #busy = new WeakSet<TokenState>();
+  readonly #sellAfterFill = new WeakSet<TokenState>();
   readonly #poolNeeded = new WeakMap<TokenState, boolean>();
   #poolTape?: (state: TokenState, needed: boolean, fromSlot?: number) => void;
   readonly timerMs: number;
@@ -72,11 +73,13 @@ export class StrategyV011Live implements Strategy {
   onBuyFill(state: TokenState, fill: { price: number; slot: number }): void {
     const engine = this.#engines.get(state);
     if (!engine) return;
-    engine.onBuyFill(toStrategyPrice(fill.price), Math.floor(Date.now() / 1000), fill.slot);
+    const missed = engine.onBuyFill(toStrategyPrice(fill.price), Math.floor(Date.now() / 1000), fill.slot);
     this.#syncPool(state, engine, fill.slot);
+    if (missed) this.#sellAfterFill.add(state);
   }
 
   onBuyFailed(state: TokenState): { rearm: boolean } {
+    this.#sellAfterFill.delete(state);
     const engine = this.#engines.get(state);
     if (!engine) return { rearm: true };
     engine.onBuyFailed();
@@ -92,6 +95,7 @@ export class StrategyV011Live implements Strategy {
   }
 
   onSellFill(state: TokenState): { rearm: boolean } {
+    this.#sellAfterFill.delete(state);
     const engine = this.#engines.get(state);
     if (!engine) return { rearm: true };
     engine.onSellFill();
@@ -150,8 +154,10 @@ export class StrategyV011Live implements Strategy {
     if (this.#busy.has(state) || isHolding(state)) return;
     if (!state.claimBuySend()) return;
     this.#busy.add(state);
+    let sent = false;
     try {
       if (!this.canOpenPosition(state)) {
+        this.#sellAfterFill.delete(state);
         state.resetBuySendClaim();
         engine.onBuyFailed();
         this.execution.recordEntryEvent(state, "entry_blocked", { reason });
@@ -170,9 +176,11 @@ export class StrategyV011Live implements Strategy {
         slippageBps: state.buySlippageBps
       });
       state.transition(TokenLifecycleState.BUY_PREPARED);
+      sent = true;
       await this.execution.sendBuy(state, performance.now());
     } catch (error) {
       this.logger.error({ err: error instanceof Error ? error.message : String(error), mint: state.descriptor.mint }, "[05 ENTRY] strategy_v_011 buy failed");
+      this.#sellAfterFill.delete(state);
       engine.onBuyFailed();
       state.resetBuySendClaim();
       try {
@@ -180,6 +188,10 @@ export class StrategyV011Live implements Strategy {
       } catch { /* ignore */ }
     } finally {
       this.#busy.delete(state);
+    }
+    // sendBuy calls onBuyFill while #busy is set, and #sell bails in that window.
+    if (sent && this.#sellAfterFill.delete(state) && isHolding(state)) {
+      await this.#sell(state, engine.lastSellReason);
     }
   }
 
