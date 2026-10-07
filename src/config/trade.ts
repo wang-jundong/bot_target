@@ -8,7 +8,7 @@ export const STRATEGY_NAMES = ["strategy_v_011", "strategy_v_022", "strategy_v_0
 export type StrategyName = (typeof STRATEGY_NAMES)[number];
 
 /** Names listed here are the ones that trade. */
-export const ACTIVE_STRATEGIES = ["strategy_v_022", "strategy_v_031"] as const satisfies readonly StrategyName[];
+export const ACTIVE_STRATEGIES = ["strategy_v_011", "strategy_v_022", "strategy_v_031"] as const satisfies readonly StrategyName[];
 
 export function selectedStrategyNames(): readonly StrategyName[] {
   return ACTIVE_STRATEGIES;
