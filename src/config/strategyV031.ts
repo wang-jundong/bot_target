@@ -50,7 +50,7 @@ export const STRATEGY_V_031_CONFIG: StrategyV031Config = {
   target_sell_exit: true,
   first_cycle_only: true,
   repeat_entries: false,
-  size_sol: 0.03
+  size_sol: 0.4
 };
 
 export function loadStrategyV031Config(): StrategyV031Config {

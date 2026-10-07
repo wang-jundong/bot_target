@@ -42,7 +42,7 @@ describe("strategy_v_031 engine", () => {
     expect(loaded.max_hold_s).toBe(85);
     expect(loaded.first_cycle_only).toBe(true);
     expect(loaded.repeat_entries).toBe(false);
-    expect(loaded.size_sol).toBe(0.03);
+    expect(loaded.size_sol).toBe(0.4);
   });
 
   it("treats a zero hit count as a window of one", () => {
