@@ -100,26 +100,33 @@ describe("Vibe stream reconnect", () => {
     }
   });
 
-  it("opens a pool on its own stream without fromSlot", async () => {
-    const streams = [new FakeStream(), new FakeStream()];
+  it("keeps one stream and replaces it when the pool set changes", async () => {
+    const opened = [new FakeStream(), new FakeStream(), new FakeStream()];
     const transport = {
       connect: async () => undefined,
-      subscribeWithReconnect: vi.fn(async () => streams.shift()!)
+      subscribeWithReconnect: vi.fn(async () => opened.shift()!)
     };
     const client = new YellowstoneVibeClient({ endpoint: "test", token: "" }, () => undefined, transport);
     const wallet = "11111111111111111111111111111111";
+    const pool = bs58.encode(Buffer.alloc(32, 7));
+    const [, combined, walletAgain] = opened;
+    const seen: string[] = [];
 
     try {
-      await client.subscribeWallet(wallet, () => undefined);
-      await client.subscribePool(
-        { mint: "mint", pool: "pool", programId: "program", venue: "pump", relevantAccounts: [] },
-        () => undefined
+      await client.subscribeWallet(wallet, tx => seen.push(`wallet:${tx.slot}`));
+      const poolSubscription = await client.subscribePool(
+        { mint: "mint", pool, programId: "program", venue: "pump", relevantAccounts: [] },
+        tx => seen.push(`pool:${tx.slot}`)
       );
-      const requests = openedWith(transport.subscribeWithReconnect);
-      expect(requests).toHaveLength(2);
-      expect(requests[0]?.transactions?.tracked?.accountInclude).toEqual([wallet]);
-      expect(requests[1]?.transactions?.tracked?.accountInclude).toEqual(["pool"]);
-      expect(requests.every(request => request.fromSlot === undefined)).toBe(true);
+      combined!.emit("data", update("10", bs58.decode(pool)));
+      await poolSubscription.close();
+      combined!.emit("data", update("11", bs58.decode(pool)));
+      walletAgain!.emit("data", update("12", bs58.decode(wallet)));
+      const includes = openedWith(transport.subscribeWithReconnect).map(request => request.transactions?.tracked?.accountInclude);
+      expect(includes).toEqual([[wallet], [pool, wallet].sort(), [wallet]]);
+      expect(openedWith(transport.subscribeWithReconnect).every(request => request.fromSlot === undefined)).toBe(true);
+      expect(transport.subscribeWithReconnect).toHaveBeenCalledTimes(3);
+      expect(seen).toEqual(["pool:10", "wallet:12"]);
     } finally {
       await client.close();
     }

@@ -32,10 +32,11 @@ const IDLE_MS = 300_000;
 export class YellowstoneVibeClient implements VibeClient {
   readonly #client: YellowstoneClientApi;
   readonly #handlers = new Map<string, Set<(tx: ParsedTargetTransaction) => void>>();
-  readonly #streams = new Map<string, Stream>();
-  readonly #opening = new Map<string, Promise<void>>();
-  readonly #retryTimers = new Map<string, NodeJS.Timeout>();
-  readonly #idleTimers = new Map<string, NodeJS.Timeout>();
+  #stream?: Stream;
+  #openKey = "";
+  #pending?: Promise<void>;
+  #retryTimer?: NodeJS.Timeout;
+  #idleTimer?: NodeJS.Timeout;
   #writeQueue: Promise<void> = Promise.resolve();
   #closing = false;
 
@@ -66,14 +67,14 @@ export class YellowstoneVibeClient implements VibeClient {
     handlers.add(onTransaction);
     while (!this.#closing) {
       try {
-        await this.#ensureStream(account);
+        await this.#whenSynced();
         break;
       } catch (error) {
         this.onError(error);
         await new Promise<void>(resolve => setTimeout(resolve, 0));
       }
     }
-    if (this.#closing || !this.#streams.has(account)) {
+    if (this.#closing || !this.#stream) {
       this.#dropHandler(account, onTransaction);
       throw new Error("Vibe client closed while subscribing");
     }
@@ -83,18 +84,17 @@ export class YellowstoneVibeClient implements VibeClient {
         if (closed) return;
         closed = true;
         this.#dropHandler(account, onTransaction);
-        if (this.#handlers.has(account)) return;
-        const stream = this.#streams.get(account);
-        if (stream && this.#detach(account, stream)) stream.destroy();
+        if (this.#closing) return;
+        await this.#whenSynced();
       }
     };
   }
 
-  /** Version 9 locks this filter at open. A later write may only be a ping, and fromSlot makes Vibe reply with status 13. */
-  #request(account: string): SubscribeRequest {
+  /** Version 9 locks the filter at open. One stream carries every account, and a changed set replaces that stream. A later write is only a ping. */
+  #request(accounts: readonly string[]): SubscribeRequest {
     return {
       accounts: {}, slots: {}, transactionsStatus: {}, blocks: {}, blocksMeta: {}, blockFooter: {}, entry: {},
-      transactions: { tracked: { vote: false, failed: false, signature: undefined, accountInclude: [account], accountExclude: [], accountRequired: [] } },
+      transactions: { tracked: { vote: false, failed: false, signature: undefined, accountInclude: [...accounts], accountExclude: [], accountRequired: [] } },
       commitment: CommitmentLevel.PROCESSED,
       accountsDataSlice: []
     };
@@ -109,31 +109,69 @@ export class YellowstoneVibeClient implements VibeClient {
     };
   }
 
-  async #ensureStream(account: string): Promise<void> {
-    if (this.#streams.has(account) || this.#closing) return;
-    let opening = this.#opening.get(account);
-    if (!opening) {
-      opening = this.#open(account).finally(() => { this.#opening.delete(account); });
-      this.#opening.set(account, opening);
-    }
-    await opening;
+  #accounts(): string[] {
+    return [...this.#handlers.keys()].sort();
   }
 
-  async #open(account: string): Promise<void> {
-    if (this.#closing || !this.#handlers.has(account)) return;
-    const stream = await this.#client.subscribeWithReconnect(this.#request(account));
-    if (this.#closing || !this.#handlers.has(account) || this.#streams.has(account)) {
-      stream.destroy();
+  #accountKey(): string {
+    return this.#accounts().join("\0");
+  }
+
+  #synced(): boolean {
+    const key = this.#accountKey();
+    return key === this.#openKey && (key === "" || this.#stream !== undefined);
+  }
+
+  async #whenSynced(): Promise<void> {
+    while (!this.#closing && !this.#synced()) await this.#kick();
+  }
+
+  #kick(): Promise<void> {
+    if (this.#pending) return this.#pending;
+    if (this.#closing || this.#synced()) return Promise.resolve();
+    const run = this.#apply();
+    this.#pending = run;
+    void run.finally(() => {
+      if (this.#pending === run) this.#pending = undefined;
+    }).then(() => {
+      if (!this.#closing && !this.#synced()) this.#kick();
+    }, () => undefined);
+    return run;
+  }
+
+  async #apply(): Promise<void> {
+    while (!this.#closing) {
+      const accounts = this.#accounts();
+      const key = accounts.join("\0");
+      if (key === this.#openKey && (key === "" || this.#stream)) return;
+      this.#dropStream();
+      if (key === "") return;
+      const stream = await this.#client.subscribeWithReconnect(this.#request(accounts));
+      if (this.#closing || this.#accountKey() !== key) {
+        stream.destroy();
+        continue;
+      }
+      this.#attach(stream, key);
       return;
     }
-    this.#streams.set(account, stream);
+  }
+
+  #attach(stream: Stream, key: string): void {
+    this.#stream = stream;
+    this.#openKey = key;
+    let dropped = false;
     const disconnected = (error?: unknown): void => {
-      if (!this.#detach(account, stream)) return;
+      if (dropped || this.#stream !== stream) return;
+      dropped = true;
+      this.#stream = undefined;
+      this.#openKey = "";
+      this.#clearIdle();
       if (error) this.onError(error);
-      this.#scheduleReconnect(account);
+      this.#scheduleRetry();
     };
     stream.on("data", event => {
-      this.#armIdle(account);
+      if (this.#stream !== stream) return;
+      this.#armIdle();
       if (event.type === "DiscardBanks") return;
       if (event.type !== "Update") return;
       const update: SubscribeUpdate = event.update;
@@ -146,13 +184,13 @@ export class YellowstoneVibeClient implements VibeClient {
       if (!info || !message || info.meta?.err) return;
       const slot = Number(update.transaction!.slot);
       const accountKeys = [...message.accountKeys, ...(info.meta?.loadedWritableAddresses ?? []), ...(info.meta?.loadedReadonlyAddresses ?? [])].map(key => bs58.encode(key));
-      const programIds = message.instructions.map(ix => accountKeys[ix.programIdIndex]).filter((key): key is string => key !== undefined);
-      this.#deliver(account, { signature: bs58.encode(info.signature), slot, timestampMs: Date.now(), accountKeys, programIds, raw: info });
+      const programIds = message.instructions.map(ix => accountKeys[ix.programIdIndex]).filter((id): id is string => id !== undefined);
+      this.#deliver({ signature: bs58.encode(info.signature), slot, timestampMs: Date.now(), accountKeys, programIds, raw: info });
     });
     stream.on("error", error => disconnected(error));
     stream.on("end", () => disconnected(new Error("Vibe stream ended")));
     stream.on("close", () => disconnected(new Error("Vibe stream closed")));
-    this.#armIdle(account);
+    this.#armIdle();
   }
 
   #ping(stream: Stream): void {
@@ -161,38 +199,41 @@ export class YellowstoneVibeClient implements VibeClient {
     void run.catch(error => this.onError(error));
   }
 
-  #deliver(account: string, tx: ParsedTargetTransaction): void {
-    this.#handlers.get(account)?.values().next().value?.(tx);
+  #deliver(tx: ParsedTargetTransaction): void {
+    const present = new Set(tx.accountKeys);
+    for (const [account, handlers] of this.#handlers) {
+      if (!present.has(account)) continue;
+      handlers.values().next().value?.(tx);
+    }
   }
 
   #write(stream: Stream, request: SubscribeRequest): Promise<void> {
     return new Promise((resolve, reject) => stream.write(request, error => error ? reject(error) : resolve()));
   }
 
-  #armIdle(account: string): void {
-    this.#clearIdle(account);
-    this.#idleTimers.set(account, setTimeout(() => {
-      this.#idleTimers.delete(account);
-      const stream = this.#streams.get(account);
-      if (this.#closing || !stream || !this.#detach(account, stream)) return;
-      stream.destroy();
+  #armIdle(): void {
+    this.#clearIdle();
+    this.#idleTimer = setTimeout(() => {
+      this.#idleTimer = undefined;
+      if (this.#closing || !this.#stream) return;
+      this.#dropStream();
       this.onError(new Error(`Vibe stream idle for ${IDLE_MS / 1000}s`));
-      this.#scheduleReconnect(account);
-    }, IDLE_MS));
+      this.#scheduleRetry();
+    }, IDLE_MS);
   }
 
-  #clearIdle(account: string): void {
-    const timer = this.#idleTimers.get(account);
-    if (!timer) return;
-    clearTimeout(timer);
-    this.#idleTimers.delete(account);
+  #clearIdle(): void {
+    if (!this.#idleTimer) return;
+    clearTimeout(this.#idleTimer);
+    this.#idleTimer = undefined;
   }
 
-  #detach(account: string, stream: Stream): boolean {
-    if (this.#streams.get(account) !== stream) return false;
-    this.#streams.delete(account);
-    this.#clearIdle(account);
-    return true;
+  #dropStream(): void {
+    const stream = this.#stream;
+    this.#stream = undefined;
+    this.#openKey = "";
+    this.#clearIdle();
+    stream?.destroy();
   }
 
   #dropHandler(account: string, onTransaction: (tx: ParsedTargetTransaction) => void): void {
@@ -201,24 +242,19 @@ export class YellowstoneVibeClient implements VibeClient {
     if (!handlers || handlers.size === 0) this.#handlers.delete(account);
   }
 
-  #scheduleReconnect(account: string): void {
-    if (this.#closing || !this.#handlers.has(account) || this.#retryTimers.has(account)) return;
-    const timer = setTimeout(() => {
-      this.#retryTimers.delete(account);
-      void this.#ensureStream(account).catch(error => { this.onError(error); this.#scheduleReconnect(account); });
+  #scheduleRetry(): void {
+    if (this.#closing || this.#handlers.size === 0 || this.#retryTimer) return;
+    this.#retryTimer = setTimeout(() => {
+      this.#retryTimer = undefined;
+      void this.#kick().catch(error => { this.onError(error); this.#scheduleRetry(); });
     }, 0);
-    this.#retryTimers.set(account, timer);
   }
 
   async close(): Promise<void> {
     this.#closing = true;
-    for (const timer of this.#retryTimers.values()) clearTimeout(timer);
-    this.#retryTimers.clear();
-    for (const timer of this.#idleTimers.values()) clearTimeout(timer);
-    this.#idleTimers.clear();
+    if (this.#retryTimer) clearTimeout(this.#retryTimer);
+    this.#retryTimer = undefined;
     this.#handlers.clear();
-    const streams = [...this.#streams.values()];
-    this.#streams.clear();
-    for (const stream of streams) stream.destroy();
+    this.#dropStream();
   }
 }
