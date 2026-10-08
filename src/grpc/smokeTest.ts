@@ -1,6 +1,9 @@
 import "dotenv/config";
-import { createRequire } from "node:module";
-import { CommitmentLevel } from "@triton-one/yellowstone-grpc";
+import Yellowstone, { CommitmentLevel } from "@triton-one/yellowstone-grpc";
+
+type YellowstoneClient = typeof import("@triton-one/yellowstone-grpc").default;
+// The ESM build exports the class as default. TypeScript types the package as CommonJS, so the import needs this cast.
+const Client = Yellowstone as unknown as YellowstoneClient;
 
 const endpoint = process.env.VIBE_GRPC_ENDPOINT?.trim();
 const token = process.env.VIBE_GRPC_TOKEN?.trim();
@@ -9,17 +12,7 @@ if (!endpoint) throw new Error("VIBE_GRPC_ENDPOINT is missing from .env");
 if (!/^https?:\/\//i.test(endpoint)) throw new Error("VIBE_GRPC_ENDPOINT must start with https:// or http://");
 
 // Vibe cloud plans use X-Token. Discord/IP-allowlisted plans intentionally omit it.
-const require = createRequire(import.meta.url);
-interface SmokeClient {
-  connect(): Promise<void>;
-  ping(count: number): Promise<{ count: number }>;
-  getVersion(): Promise<{ version: string }>;
-  getSlot(commitment?: CommitmentLevel): Promise<{ slot: string }>;
-}
-const YellowstoneClient = (require("@triton-one/yellowstone-grpc") as {
-  default: new (endpoint: string, token: string | undefined, options: { grpcMaxDecodingMessageSize?: number }) => SmokeClient;
-}).default;
-const client = new YellowstoneClient(endpoint, token || undefined, {
+const client = new Client(endpoint, token || undefined, {
   grpcMaxDecodingMessageSize: 16 * 1024 * 1024
 });
 
