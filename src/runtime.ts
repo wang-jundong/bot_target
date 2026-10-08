@@ -1,7 +1,8 @@
 import type { Logger } from "pino";
 import { PublicKey, type Connection } from "@solana/web3.js";
 import type { AppConfig } from "./config/index.js";
-import type { Subscription, VibeClient } from "./grpc/vibeClient.js";
+import type { ReplayGap, Subscription, VibeClient } from "./grpc/vibeClient.js";
+import { catchUpReplayGap, connectionReplaySource } from "./grpc/replayCatchUp.js";
 import type { Strategy } from "./strategy/types.js";
 import { TokenLifecycleState } from "./strategy/state.js";
 import { poolKey, TokenStateManager } from "./state/tokenStateManager.js";
@@ -52,6 +53,8 @@ export class TradingRuntime {
   #healthTimer?: NodeJS.Timeout;
   #receivedTransactions = 0;
   #decodedEvents = 0;
+  #closed = false;
+  #catchUpQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly config: AppConfig,
@@ -128,6 +131,24 @@ export class TradingRuntime {
       }, "[HEALTH] Bot is running");
     }, 30_000);
     this.logger.info({ targets: this.#slots.map(slot => ({ strategy: slot.name, targetWallet: slot.targetWallet })), strategy: this.config.strategy, timerMs: tickMs }, "[01 STARTUP] Trading runtime started");
+  }
+
+  /**
+   * Vibe drops a rejected replay instead of retrying it. The target's full sell often
+   * lands in that hole, a few slots after the buy that opened the pool. Read it back
+   * from RPC once the live stream is up, before the strategy can buy into an empty bag.
+   */
+  async recoverReplayGap(gap: ReplayGap): Promise<void> {
+    if (this.#closed || gap.accounts.length === 0) return;
+    const run = this.#catchUpQueue.then(async () => {
+      if (this.#closed) return;
+      await new Promise<void>(resolve => setTimeout(resolve, 500));
+      if (this.#closed) return;
+      const enqueued = await catchUpReplayGap(gap, connectionReplaySource(this.connection), tx => this.#enqueue(tx));
+      this.logger.info({ fromSlot: gap.fromSlot, accounts: gap.accounts.length, enqueued }, "[02 STREAM] Caught up missed replay slots");
+    });
+    this.#catchUpQueue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   #enqueue(tx: Parameters<PumpTradeDecoder["decode"]>[0]): void {
@@ -343,6 +364,7 @@ export class TradingRuntime {
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
     const tracked = this.#slots.reduce((sum, slot) => sum + [...slot.states.values()].length, 0);
     this.logger.info({ subscriptions: this.#subscriptions.size, receivedTransactions: this.#receivedTransactions, decodedEvents: this.#decodedEvents, tracked }, "[SHUTDOWN] Trading runtime stopping");
     if (this.#positionTimer) clearInterval(this.#positionTimer);

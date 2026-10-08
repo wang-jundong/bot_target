@@ -65,6 +65,11 @@ const strategies = config.strategyPlans.map(plan => {
   return { name: plan.name, strategy, buyAmountLamports: plan.buyAmountLamports, targetWallet: plan.targetWallet, owner: plan.keypair.publicKey };
 });
 runtime = new TradingRuntime(config, connection, vibe, journal, new PumpTradeDecoder(connection), adapters, logger, strategies);
+vibe.setReplayGapHandler(gap => {
+  void runtime.recoverReplayGap(gap).catch(error => {
+    logger.error({ err: error instanceof Error ? error.message : String(error), fromSlot: gap.fromSlot }, "[02 STREAM] Replay catch-up failed");
+  });
+});
 
 const strategyKnobs = Object.fromEntries(config.strategyPlans.map(plan => [plan.name, plan.name === "strategy_v_022"
   ? {

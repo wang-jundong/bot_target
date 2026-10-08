@@ -5,6 +5,8 @@ import { CommitmentLevel, type SubscribeRequest, type SubscribeUpdate } from "@t
 
 export interface VibeConnectionOptions { endpoint: string; token: string; }
 export interface Subscription { close(): Promise<void>; }
+/** Slots the gRPC replay refused to serve. The live stream is back; these still need an RPC catch-up. */
+export interface ReplayGap { fromSlot: number; accounts: readonly string[]; }
 export interface VibeClient {
   connect(): Promise<void>;
   subscribeWallet(wallet: string, onTransaction: (tx: ParsedTargetTransaction) => void): Promise<Subscription>;
@@ -51,6 +53,11 @@ export class YellowstoneVibeClient implements VibeClient {
   #lastSlot = 0;
   /** Next live filter write replays from this slot, then clears it. Ping writes do not. */
   #reconnectFromSlot?: number;
+  /** fromSlot accepted by the current stream. A rejected replay reports this to the catch-up. */
+  #replayOrigin?: number;
+  /** Earliest slot a rejected replay failed to deliver. Flushed once the next live filter is written. */
+  #missedFromSlot?: number;
+  #onReplayGap?: (gap: ReplayGap) => void;
   /** True after this stream has accepted a filter. A later fromSlot has to be a new stream. */
   #filterWritten = false;
   /** Pool catch-up slot. Served on a side stream so a replay failure cannot drop wallet delivery. */
@@ -68,6 +75,9 @@ export class YellowstoneVibeClient implements VibeClient {
   }
 
   async connect(): Promise<void> {}
+  setReplayGapHandler(handler: (gap: ReplayGap) => void): void {
+    this.#onReplayGap = handler;
+  }
   subscribeWallet(wallet: string, onTransaction: (tx: ParsedTargetTransaction) => void): Promise<Subscription> {
     return this.#subscribe(wallet, onTransaction);
   }
@@ -153,15 +163,19 @@ export class YellowstoneVibeClient implements VibeClient {
     this.#stream = stream;
     const disconnected = (error?: unknown): void => {
       if (!this.#detach(stream)) return;
-      this.#dropReplay();
       if (isReplayRejected(error)) {
-        // Vibe cannot serve this replay. Asking for the same slot again loops the stream.
+        // Vibe rejected this replay slot asynchronously. Retrying it would loop forever.
+        // The slots it refused are caught up from RPC once the live stream is back.
+        if (this.#replayOrigin) this.#noteMissed(this.#replayOrigin);
+        if (this.#catchupSlot) this.#noteMissed(this.#catchupSlot);
+        this.#replayOrigin = undefined;
         this.#reconnectFromSlot = undefined;
         this.#catchupSlot = undefined;
         this.#lastSlot = 0;
       } else {
         this.#armReconnect(this.#lastSlot);
       }
+      this.#dropReplay();
       if (error) this.onError(error);
       this.#scheduleReconnect();
     };
@@ -202,8 +216,14 @@ export class YellowstoneVibeClient implements VibeClient {
     const stop = (error?: unknown): void => {
       if (this.#replayStream !== stream) return;
       this.#replayStream = undefined;
+      const missed = this.#catchupSlot;
       this.#catchupSlot = undefined;
       stream.cancel();
+      // The live stream is already up. A rejected pool replay still has to be read back from RPC.
+      if (error && isReplayRejected(error) && missed) {
+        this.#noteMissed(missed);
+        this.#flushMissed();
+      }
       if (error && !this.#closing) this.onError(error);
     };
     stream.on("data", update => {
@@ -247,7 +267,7 @@ export class YellowstoneVibeClient implements VibeClient {
   async #writeOnce(ping: boolean): Promise<void> {
     const stream = this.#stream;
     if (!stream) return;
-    const fromSlot = ping ? undefined : this.#reconnectFromSlot;
+    let fromSlot = ping ? undefined : this.#reconnectFromSlot;
     if (!ping) this.#reconnectFromSlot = undefined;
     // Vibe returns 13 INTERNAL when fromSlot is written onto an open stream, and that kills every subscription.
     if (fromSlot && this.#filterWritten) {
@@ -259,13 +279,35 @@ export class YellowstoneVibeClient implements VibeClient {
     }
     try {
       await this.#write(stream, this.#request(fromSlot, ping));
+      if (fromSlot) this.#replayOrigin = fromSlot;
     } catch (error) {
       if (!fromSlot) throw error;
-      if (isReplayRejected(error)) this.#lastSlot = 0;
+      if (isReplayRejected(error)) {
+        this.#noteMissed(fromSlot);
+        this.#replayOrigin = undefined;
+        this.#lastSlot = 0;
+      }
       this.onError(error);
       await this.#write(stream, this.#request(undefined, ping));
+      fromSlot = undefined;
     }
     if (!ping) this.#filterWritten = true;
+    if (!ping && !fromSlot) this.#flushMissed();
+  }
+
+  #noteMissed(slot: number): void {
+    if (this.#missedFromSlot === undefined || slot < this.#missedFromSlot) this.#missedFromSlot = slot;
+  }
+
+  #flushMissed(): void {
+    const fromSlot = this.#missedFromSlot;
+    if (fromSlot === undefined || !this.#onReplayGap) return;
+    this.#missedFromSlot = undefined;
+    try {
+      this.#onReplayGap({ fromSlot, accounts: [...this.#handlers.keys()] });
+    } catch (error) {
+      this.onError(error);
+    }
   }
 
   #write(stream: Stream, request: SubscribeRequest): Promise<void> {
