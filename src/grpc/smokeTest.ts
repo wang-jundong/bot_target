@@ -11,20 +11,21 @@ if (!/^https?:\/\//i.test(endpoint)) throw new Error("VIBE_GRPC_ENDPOINT must st
 // Vibe cloud plans use X-Token. Discord/IP-allowlisted plans intentionally omit it.
 const require = createRequire(import.meta.url);
 interface SmokeClient {
-  ping(count: number): Promise<number>;
-  getVersion(): Promise<string>;
-  getSlot(commitment?: CommitmentLevel): Promise<string>;
-  _client: { close(): void };
+  connect(): Promise<void>;
+  ping(count: number): Promise<{ count: number }>;
+  getVersion(): Promise<{ version: string }>;
+  getSlot(commitment?: CommitmentLevel): Promise<{ slot: string }>;
 }
 const YellowstoneClient = (require("@triton-one/yellowstone-grpc") as {
-  default: new (endpoint: string, token: string | undefined, options: Record<string, number>) => SmokeClient;
+  default: new (endpoint: string, token: string | undefined, options: { grpcMaxDecodingMessageSize?: number }) => SmokeClient;
 }).default;
 const client = new YellowstoneClient(endpoint, token || undefined, {
-  "grpc.max_receive_message_length": 16 * 1024 * 1024
+  grpcMaxDecodingMessageSize: 16 * 1024 * 1024
 });
 
 const started = performance.now();
 try {
+  await client.connect();
   const [pong, version, slot] = await Promise.all([
     client.ping(1),
     client.getVersion(),
@@ -35,14 +36,12 @@ try {
     endpoint,
     authentication: token ? "x-token configured" : "IP allowlist/no token",
     roundTripMs: Number((performance.now() - started).toFixed(2)),
-    pong,
-    version,
-    slot
+    pong: pong.count,
+    version: version.version,
+    slot: slot.slot
   });
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error({ ok: false, endpoint, authentication: token ? "x-token configured" : "no token", error: message });
   process.exitCode = 1;
-} finally {
-  client._client.close();
 }

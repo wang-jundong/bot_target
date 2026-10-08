@@ -13,7 +13,7 @@ export class StrategyV031Live implements Strategy {
   readonly #busy = new WeakSet<TokenState>();
   readonly #sellAfterFill = new WeakSet<TokenState>();
   readonly #poolNeeded = new WeakMap<TokenState, boolean>();
-  #poolTape?: (state: TokenState, needed: boolean, fromSlot?: number) => void;
+  #poolTape?: (state: TokenState, needed: boolean) => void;
   readonly timerMs = 1_000;
 
   constructor(
@@ -27,7 +27,7 @@ export class StrategyV031Live implements Strategy {
     private readonly logger: Logger
   ) {}
 
-  setPoolTape(listener: (state: TokenState, needed: boolean, fromSlot?: number) => void): void {
+  setPoolTape(listener: (state: TokenState, needed: boolean) => void): void {
     this.#poolTape = listener;
   }
 
@@ -42,7 +42,7 @@ export class StrategyV031Live implements Strategy {
           event.timestampMs
         );
       }
-      this.#syncPool(state, engine, event.slot);
+      this.#syncPool(state, engine);
       return;
     }
     if (!engine.isBound) {
@@ -55,7 +55,7 @@ export class StrategyV031Live implements Strategy {
     if ((this.cfg.target_sell_exit || this.cfg.first_cycle_only) && before === "pending" && cycleEnded && market.side === "SELL" && market.wallet === this.targetWallet) {
       this.#sellAfterFill.add(state);
     }
-    this.#syncPool(state, engine, event.slot);
+    this.#syncPool(state, engine);
     void this.#dispatch(state, engine, signal);
   }
 
@@ -106,11 +106,11 @@ export class StrategyV031Live implements Strategy {
     this.#syncPool(state, engine);
   }
 
-  #syncPool(state: TokenState, engine: StrategyV031Engine, fromSlot?: number): void {
+  #syncPool(state: TokenState, engine: StrategyV031Engine): void {
     const needed = engine.needsPoolTape();
     if (this.#poolNeeded.get(state) === needed) return;
     this.#poolNeeded.set(state, needed);
-    this.#poolTape?.(state, needed, needed ? fromSlot : undefined);
+    this.#poolTape?.(state, needed);
   }
 
   #engine(state: TokenState): StrategyV031Engine {

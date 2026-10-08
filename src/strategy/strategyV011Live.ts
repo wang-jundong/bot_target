@@ -13,7 +13,7 @@ export class StrategyV011Live implements Strategy {
   readonly #busy = new WeakSet<TokenState>();
   readonly #sellAfterFill = new WeakSet<TokenState>();
   readonly #poolNeeded = new WeakMap<TokenState, boolean>();
-  #poolTape?: (state: TokenState, needed: boolean, fromSlot?: number) => void;
+  #poolTape?: (state: TokenState, needed: boolean) => void;
   readonly timerMs: number;
 
   constructor(
@@ -29,7 +29,7 @@ export class StrategyV011Live implements Strategy {
     this.timerMs = cfg.timer_ms > 0 ? cfg.timer_ms : 200;
   }
 
-  setPoolTape(listener: (state: TokenState, needed: boolean, fromSlot?: number) => void): void {
+  setPoolTape(listener: (state: TokenState, needed: boolean) => void): void {
     this.#poolTape = listener;
   }
 
@@ -49,13 +49,13 @@ export class StrategyV011Live implements Strategy {
         nowMs: state.targetBuy.timestampMs
       });
       this.#logDecision(state, bind, "gate");
-      this.#syncPool(state, engine, event.slot);
+      this.#syncPool(state, engine);
       if (bind.kind === "skip" || engine.isDone) return;
       // The gate buy starts the clock. Later pool events and timers decide the entry.
       if (event.signature === state.targetBuy.signature && event.eventIndex === state.targetBuy.eventIndex) return;
     }
     const decision = engine.onEvent(market, holding);
-    this.#syncPool(state, engine, event.slot);
+    this.#syncPool(state, engine);
     void this.#dispatch(state, engine, decision);
   }
 
@@ -74,7 +74,7 @@ export class StrategyV011Live implements Strategy {
     const engine = this.#engines.get(state);
     if (!engine) return;
     const missed = engine.onBuyFill(toStrategyPrice(fill.price), Math.floor(Date.now() / 1000), fill.slot);
-    this.#syncPool(state, engine, fill.slot);
+    this.#syncPool(state, engine);
     if (missed) this.#sellAfterFill.add(state);
   }
 
@@ -123,11 +123,11 @@ export class StrategyV011Live implements Strategy {
     this.#syncPool(state, engine);
   }
 
-  #syncPool(state: TokenState, engine: StrategyV011Engine, fromSlot?: number): void {
+  #syncPool(state: TokenState, engine: StrategyV011Engine): void {
     const needed = engine.needsPoolTape();
     if (this.#poolNeeded.get(state) === needed) return;
     this.#poolNeeded.set(state, needed);
-    this.#poolTape?.(state, needed, needed ? fromSlot : undefined);
+    this.#poolTape?.(state, needed);
   }
 
   #engine(state: TokenState): StrategyV011Engine | undefined {

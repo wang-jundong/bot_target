@@ -1,8 +1,7 @@
 import type { Logger } from "pino";
 import { PublicKey, type Connection } from "@solana/web3.js";
 import type { AppConfig } from "./config/index.js";
-import type { ReplayGap, Subscription, VibeClient } from "./grpc/vibeClient.js";
-import { catchUpReplayGap, connectionReplaySource } from "./grpc/replayCatchUp.js";
+import type { Subscription, VibeClient } from "./grpc/vibeClient.js";
 import type { Strategy } from "./strategy/types.js";
 import { TokenLifecycleState } from "./strategy/state.js";
 import { poolKey, TokenStateManager } from "./state/tokenStateManager.js";
@@ -53,8 +52,6 @@ export class TradingRuntime {
   #healthTimer?: NodeJS.Timeout;
   #receivedTransactions = 0;
   #decodedEvents = 0;
-  #closed = false;
-  #catchUpQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly config: AppConfig,
@@ -77,11 +74,11 @@ export class TradingRuntime {
       owner: entry.owner
     }));
     for (const slot of this.#slots) {
-      slot.strategy.setPoolTape?.((state, needed, fromSlot) => {
+      slot.strategy.setPoolTape?.((state, needed) => {
         const owner = this.#owner.get(state);
         if (!owner) return;
         owner.poolNeeded.set(poolKey(state.descriptor), needed);
-        this.#queueSync(state.descriptor, needed ? fromSlot : undefined);
+        this.#queueSync(state.descriptor);
       });
     }
   }
@@ -133,24 +130,6 @@ export class TradingRuntime {
     this.logger.info({ targets: this.#slots.map(slot => ({ strategy: slot.name, targetWallet: slot.targetWallet })), strategy: this.config.strategy, timerMs: tickMs }, "[01 STARTUP] Trading runtime started");
   }
 
-  /**
-   * Vibe drops a rejected replay instead of retrying it. The target's full sell often
-   * lands in that hole, a few slots after the buy that opened the pool. Read it back
-   * from RPC once the live stream is up, before the strategy can buy into an empty bag.
-   */
-  async recoverReplayGap(gap: ReplayGap): Promise<void> {
-    if (this.#closed || gap.accounts.length === 0) return;
-    const run = this.#catchUpQueue.then(async () => {
-      if (this.#closed) return;
-      await new Promise<void>(resolve => setTimeout(resolve, 500));
-      if (this.#closed) return;
-      const enqueued = await catchUpReplayGap(gap, connectionReplaySource(this.connection), tx => this.#enqueue(tx));
-      this.logger.info({ fromSlot: gap.fromSlot, accounts: gap.accounts.length, enqueued }, "[02 STREAM] Caught up missed replay slots");
-    });
-    this.#catchUpQueue = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
   #enqueue(tx: Parameters<PumpTradeDecoder["decode"]>[0]): void {
     this.#receivedTransactions++;
     this.logger.debug({ signature: tx.signature, slot: tx.slot, accountCount: tx.accountKeys.length, programCount: tx.programIds.length }, "[02 STREAM] Transaction received");
@@ -186,7 +165,7 @@ export class TradingRuntime {
       state.prices.currentMarkPrice = event.price;
       slot.strategy.onEvent(state, event);
       if (this.#isTerminal(state)) this.#dropState(slot, state, "strategy finished");
-      else this.#queueSync(descriptor, event.slot);
+      else this.#queueSync(descriptor);
       return true;
     }
     if (!state) return false;
@@ -333,24 +312,24 @@ export class TradingRuntime {
     this.#queueSync(descriptor);
   }
 
-  #queueSync(descriptor: Parameters<VibeClient["subscribePool"]>[0], fromSlot?: number): void {
-    this.#queue = this.#queue.then(() => this.#syncSubscription(descriptor, fromSlot)).catch(error => {
+  #queueSync(descriptor: Parameters<VibeClient["subscribePool"]>[0]): void {
+    this.#queue = this.#queue.then(() => this.#syncSubscription(descriptor)).catch(error => {
       this.logger.error({ err: error instanceof Error ? error.message : String(error), mint: descriptor.mint }, "[02 STREAM] Pool filter update failed");
     });
   }
 
-  async #syncSubscription(descriptor: Parameters<VibeClient["subscribePool"]>[0], fromSlot?: number): Promise<void> {
+  async #syncSubscription(descriptor: Parameters<VibeClient["subscribePool"]>[0]): Promise<void> {
     const key = poolKey(descriptor);
     const wanted = this.#slots.some(slot => slot.poolNeeded.get(key) === true);
-    if (wanted) await this.#subscribePool(descriptor, fromSlot);
+    if (wanted) await this.#subscribePool(descriptor);
     else await this.#releaseSubscription(key, descriptor);
   }
 
-  async #subscribePool(descriptor: Parameters<VibeClient["subscribePool"]>[0], fromSlot?: number): Promise<void> {
+  async #subscribePool(descriptor: Parameters<VibeClient["subscribePool"]>[0]): Promise<void> {
     const key = `${descriptor.programId}:${descriptor.pool}`;
     if (this.#subscriptions.has(key)) return;
-    this.logger.info({ mint: descriptor.mint, pool: descriptor.pool, venue: descriptor.venue, fromSlot }, "[02 STREAM] Opening pool subscription");
-    const subscription = await this.vibe.subscribePool(descriptor, tx => this.#enqueue(tx), fromSlot);
+    this.logger.info({ mint: descriptor.mint, pool: descriptor.pool, venue: descriptor.venue }, "[02 STREAM] Opening pool subscription");
+    const subscription = await this.vibe.subscribePool(descriptor, tx => this.#enqueue(tx));
     this.#subscriptions.set(key, subscription);
     this.logger.info({ mint: descriptor.mint, pool: descriptor.pool, subscriptions: this.#subscriptions.size }, "[02 STREAM] Pool subscription active");
   }
@@ -364,7 +343,6 @@ export class TradingRuntime {
   }
 
   async close(): Promise<void> {
-    this.#closed = true;
     const tracked = this.#slots.reduce((sum, slot) => sum + [...slot.states.values()].length, 0);
     this.logger.info({ subscriptions: this.#subscriptions.size, receivedTransactions: this.#receivedTransactions, decodedEvents: this.#decodedEvents, tracked }, "[SHUTDOWN] Trading runtime stopping");
     if (this.#positionTimer) clearInterval(this.#positionTimer);
