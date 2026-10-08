@@ -32,7 +32,7 @@ export const STRATEGY_V_022_CONFIG: StrategyV022Config = {
   stop_loss: 0.0,
   take_profit: 0.15,
   target_sell_exit: true,
-  size_sol: 0.5
+  size_sol: 0.6
 };
 
 export function loadStrategyV022Config(): StrategyV022Config {
