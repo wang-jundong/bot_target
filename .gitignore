@@ -1,11 +1,14 @@
-node_modules/
-dist/
+/target
 .env
+.env.*
+
+# Embedded secrets (copy from bindings.example.rs)
+src/bindings.rs
+
 recovery/*.jsonl
 *.log
 logs/*.txt
 logs/*.jsonl
-logs/*.json
 secrets/
 *.key
 *.bin

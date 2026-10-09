@@ -1,0 +1,50 @@
+[package]
+name = "bot_target"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of bot_target multi-strategy Solana trading bot (v011/v022/v031)"
+
+[[bin]]
+name = "bot_target"
+path = "src/main.rs"
+
+[[bin]]
+name = "close-accounts"
+path = "src/bin/close_accounts.rs"
+
+[[bin]]
+name = "sell-all"
+path = "src/bin/sell_all.rs"
+
+[dependencies]
+aes = "0.8"
+anyhow = "1"
+base64 = "0.22"
+bincode = "1"
+bs58 = "0.5"
+cbc = "0.1"
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
+futures = "0.3"
+hmac = "0.12"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# Solana 2.3 line for SDK/RPC/SPL. Yellowstone client 13.5 + proto 12.7
+# (solana-pubkey 4 only as a transitive helper; we keep Solana 2.3 Pubkeys).
+# gRPC transport follows New Folder: keepalive + in-place filter updates.
+solana-account-decoder-client-types = "=2.3.7"
+solana-client = "=2.3.7"
+solana-sdk = "=2.3.1"
+solana-transaction-status-client-types = "=2.3.7"
+spl-associated-token-account = "=7.0.0"
+spl-token = "=8.0.0"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+yellowstone-grpc-client = "=13.5.1"
+yellowstone-grpc-proto = { version = "=12.7.0", default-features = false, features = ["tonic", "tonic-compression"] }
