@@ -1,7 +1,7 @@
 use super::ids::{
     amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume, amm_user_volume, ata, bonding_curve_pda,
-    coin_creator_vault_authority, pool_v2_pda, PUMP_AMM_PROGRAM, PUMP_FEE_PROGRAM, PUMP_PROGRAM, TOKEN_2022_PROGRAM,
-    TOKEN_PROGRAM,
+    coin_creator_vault_authority, is_pump_fee_recipient, pool_v2_pda, PUMP_AMM_PROGRAM, PUMP_FEE_PROGRAM, PUMP_PROGRAM,
+    TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
 };
 use crate::events::{
     mono_ms, CompiledIx, ParsedTargetTransaction, PoolDescriptor, PoolTradeEvent, PumpCurveSnapshot, PumpSwapSnapshot, Side,
@@ -157,6 +157,14 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
     let price = ratio(quote_reserves, virtual_token);
     let mut event = base_event(tx, event_index, &descriptor, &user.to_string(), is_buy, sol_amount, token_amount, price, None, timestamp);
     if let Some(creator) = creator {
+        // Drop invalid fee recipients (e.g. System Program / quote mint) so trades never trust them.
+        let fee_recipient = fee_recipient.and_then(|key| {
+            if is_pump_fee_recipient(&key, mayhem) {
+                Some(key.to_string())
+            } else {
+                None
+            }
+        });
         event.curve = Some(PumpCurveSnapshot {
             virtual_quote_reserves: quote_reserves as u128,
             virtual_token_reserves: virtual_token as u128,
@@ -166,7 +174,7 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
             quote_mint: quote_mint.map(|k| k.to_string()),
             protocol_fee_bps: fee_bps.unwrap_or(0) as u128,
             creator_fee_bps: creator_fee_bps.unwrap_or(0) as u128,
-            fee_recipient: fee_recipient.map(|k| k.to_string()),
+            fee_recipient,
             cashback: cashback_bps > 0,
         });
     }

@@ -25,6 +25,23 @@ pub static PUMP_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
     .collect()
 });
 
+/// Mayhem-mode coins must use these as `fee_recipient` (not the normal list).
+pub static PUMP_RESERVED_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
+    vec![
+        "GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS",
+        "4budycTjhs9fD6xw62VBducVTNgMgJJ5BgtKq7mAZwn6",
+        "8SBKzEQU4nLSzcwF4a74F2iaUDQyTfjGndn6qUWBnrpR",
+        "4UQeTP1T39KZ9Sfxzo3WR5skgsaP6NZa87BAkuazLEKH",
+        "8sNeir4QsLsJdYpc9RZacohhK1Y5FLU3nC5LXgYB4aa6",
+        "Fh9HmeLNUMVCvejxCtCL2DbYaRyBFVJ5xrWkLnMH6fdk",
+        "463MEnMeGyJekNZFQSTUABBEbLnvMTALbT6ZmsxAbAdq",
+        "6AUH3WEHucYZyC61hqpqYUWVto5qA5hjHuNQ32GNnNxA",
+    ]
+    .into_iter()
+    .map(pubkey)
+    .collect()
+});
+
 pub static PUMP_BUYBACK_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
     vec![
         "5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD",
@@ -40,6 +57,23 @@ pub static PUMP_BUYBACK_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(||
     .map(pubkey)
     .collect()
 });
+
+pub fn pump_fee_recipients(mayhem: bool) -> &'static [Pubkey] {
+    if mayhem {
+        PUMP_RESERVED_FEE_RECIPIENTS.as_slice()
+    } else {
+        PUMP_FEE_RECIPIENTS.as_slice()
+    }
+}
+
+pub fn is_pump_fee_recipient(key: &Pubkey, mayhem: bool) -> bool {
+    pump_fee_recipients(mayhem).iter().any(|allowed| allowed == key)
+}
+
+#[allow(dead_code)]
+pub fn is_pump_buyback_fee_recipient(key: &Pubkey) -> bool {
+    PUMP_BUYBACK_FEE_RECIPIENTS.iter().any(|allowed| allowed == key)
+}
 
 pub static HELIUS_TIP_ACCOUNTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
     vec![

@@ -1,8 +1,8 @@
 use super::ids::{
     amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume, amm_user_volume, ata, bonding_curve_pda,
-    bonding_curve_v2_pda, coin_creator_vault_authority, creator_vault_pda, pool_v2_pda, pump_event_authority, pump_fee_config,
-    pump_global, pump_global_volume, pump_user_volume, HELIUS_TIP_ACCOUNTS, PUMP_AMM_PROGRAM, PUMP_BUYBACK_FEE_RECIPIENTS,
-    PUMP_FEE_PROGRAM, PUMP_FEE_RECIPIENTS, PUMP_PROGRAM,
+    bonding_curve_v2_pda, coin_creator_vault_authority, creator_vault_pda, is_pump_fee_recipient, pool_v2_pda,
+    pump_event_authority, pump_fee_config, pump_fee_recipients, pump_global, pump_global_volume, pump_user_volume,
+    HELIUS_TIP_ACCOUNTS, PUMP_AMM_PROGRAM, PUMP_BUYBACK_FEE_RECIPIENTS, PUMP_FEE_PROGRAM, PUMP_PROGRAM,
 };
 use super::quote::{quote_amm_buy, quote_amm_sell, quote_buy_tokens, quote_sell_sol, slippage_down};
 use crate::events::{PumpCurveSnapshot, PumpSwapSnapshot};
@@ -24,6 +24,22 @@ const AMM_BUY: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 
 fn pick(list: &[Pubkey]) -> Pubkey {
     list[rand::random::<usize>() % list.len()]
+}
+
+/// Only allowlisted fee recipients are valid. Streamed `curve.fee_recipient` can be
+/// wrong (e.g. native SOL quote mint `11111…`), which makes pump return ConstraintMut.
+fn resolve_fee_recipient(curve: &PumpCurveSnapshot) -> Pubkey {
+    let allowed = pump_fee_recipients(curve.mayhem_mode);
+    if let Some(candidate) = curve.fee_recipient.as_deref().and_then(|value| value.parse().ok()) {
+        if is_pump_fee_recipient(&candidate, curve.mayhem_mode) {
+            return candidate;
+        }
+    }
+    pick(allowed)
+}
+
+fn resolve_buyback_fee_recipient() -> Pubkey {
+    pick(&PUMP_BUYBACK_FEE_RECIPIENTS)
 }
 
 fn u64_le(value: u64) -> [u8; 8] {
@@ -58,7 +74,7 @@ pub fn build_pump_buy(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey, lam
     let min_tokens = slippage_down(quoted, slippage_bps) as u64;
     let associated_user = ata(owner, mint, token_program);
     let creator: Pubkey = curve.creator.parse()?;
-    let fee_recipient = curve.fee_recipient.as_deref().and_then(|value| value.parse().ok()).unwrap_or_else(|| pick(&PUMP_FEE_RECIPIENTS));
+    let fee_recipient = resolve_fee_recipient(curve);
     let curve_pda = bonding_curve_pda(mint);
     let mut data = Vec::with_capacity(8 + 8 + 8 + 1);
     data.extend_from_slice(&BUY_EXACT_SOL_IN);
@@ -85,7 +101,7 @@ pub fn build_pump_buy(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey, lam
             meta(pump_fee_config(), false, false),
             meta(*PUMP_FEE_PROGRAM, false, false),
             meta(bonding_curve_v2_pda(mint), false, false),
-            meta(pick(&PUMP_BUYBACK_FEE_RECIPIENTS), true, false),
+            meta(resolve_buyback_fee_recipient(), true, false),
         ],
         data,
     };
@@ -96,7 +112,7 @@ pub fn build_pump_sell(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey, to
     let sol_out = quote_sell_sol(token_amount as u128, curve);
     let min_sol = slippage_down(sol_out, slippage_bps) as u64;
     let creator: Pubkey = curve.creator.parse()?;
-    let fee_recipient = curve.fee_recipient.as_deref().and_then(|value| value.parse().ok()).unwrap_or_else(|| pick(&PUMP_FEE_RECIPIENTS));
+    let fee_recipient = resolve_fee_recipient(curve);
     let curve_pda = bonding_curve_pda(mint);
     let mut data = Vec::with_capacity(24);
     data.extend_from_slice(&SELL);
@@ -122,7 +138,7 @@ pub fn build_pump_sell(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey, to
         accounts.push(meta(pump_user_volume(owner), true, false));
     }
     accounts.push(meta(bonding_curve_v2_pda(mint), false, false));
-    accounts.push(meta(pick(&PUMP_BUYBACK_FEE_RECIPIENTS), true, false));
+    accounts.push(meta(resolve_buyback_fee_recipient(), true, false));
     Ok(prepared(
         vec![Instruction { program_id: *PUMP_PROGRAM, accounts, data }],
         *owner,
@@ -286,5 +302,57 @@ pub fn harvest_withheld_instruction(mint: &Pubkey, account: &Pubkey, program: &P
         program_id: *program,
         accounts: vec![meta(*mint, true, false), meta(*account, true, false)],
         data: vec![26, 4],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::venues::ids::PUMP_FEE_RECIPIENTS;
+
+    fn sample_curve(fee_recipient: Option<&str>) -> PumpCurveSnapshot {
+        PumpCurveSnapshot {
+            virtual_quote_reserves: 30_000_000_000,
+            virtual_token_reserves: 1_073_000_000_000_000,
+            real_token_reserves: 800_000_000_000_000,
+            creator: Pubkey::new_unique().to_string(),
+            mayhem_mode: false,
+            quote_mint: Some(solana_sdk::system_program::id().to_string()),
+            protocol_fee_bps: 100,
+            creator_fee_bps: 30,
+            fee_recipient: fee_recipient.map(str::to_string),
+            cashback: false,
+        }
+    }
+
+    #[test]
+    fn rejects_system_program_fee_recipient_on_sell() {
+        let owner = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        // This is the on-chain failure mode: quote mint / System Program leaked into fee_recipient.
+        let curve = sample_curve(Some(&solana_sdk::system_program::id().to_string()));
+        let prepared = build_pump_sell(
+            &owner,
+            &mint,
+            &crate::venues::ids::TOKEN_2022_PROGRAM,
+            1_000_000,
+            500,
+            &curve,
+            150_000,
+            100_000,
+            5_000,
+        )
+        .unwrap();
+        let sell = prepared.instructions.iter().find(|ix| ix.program_id == *PUMP_PROGRAM).unwrap();
+        let fee_recipient = sell.accounts[1].pubkey;
+        assert_ne!(fee_recipient, solana_sdk::system_program::id());
+        assert!(PUMP_FEE_RECIPIENTS.iter().any(|allowed| *allowed == fee_recipient));
+    }
+
+    #[test]
+    fn keeps_allowlisted_fee_recipient() {
+        let allowed = PUMP_FEE_RECIPIENTS[2];
+        let curve = sample_curve(Some(&allowed.to_string()));
+        assert_eq!(resolve_fee_recipient(&curve), allowed);
     }
 }
