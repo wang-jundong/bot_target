@@ -266,8 +266,12 @@ impl TradingRuntime {
             return Ok(false);
         };
 
+        let own_wallet = slot.execution.wallet.pubkey().to_string();
         let (signal, buy_reason, sell_reason, needed, changed, strategy) = {
             let mut state = token.lock().await;
+            if event.trader == own_wallet {
+                state.note_own_fill(&event.signature, event.token_amount, event.sol_amount);
+            }
             if event.trader == slot.target_wallet {
                 state.record_target_trade(event);
             }

@@ -5,6 +5,8 @@ use anyhow::{bail, Result};
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lifecycle {
@@ -157,6 +159,10 @@ pub struct TokenInner {
     pub strategy_name: String,
     pub sell_after_fill: bool,
     pub pool_tape_needed: Option<bool>,
+    /// Fills seen on the pool stream, keyed by signature. Confirmation can use these
+    /// instead of waiting for an RPC `confirmed` lookup.
+    own_fills: HashMap<String, (u64, u64, f64)>,
+    pub own_fill_notify: Arc<Notify>,
 }
 
 impl TokenInner {
@@ -189,7 +195,25 @@ impl TokenInner {
             strategy_name,
             sell_after_fill: false,
             pool_tape_needed: None,
+            own_fills: HashMap::new(),
+            own_fill_notify: Arc::new(Notify::new()),
         }
+    }
+
+    pub fn note_own_fill(&mut self, signature: &str, token_amount: u64, sol_amount: u64) {
+        if token_amount == 0 && sol_amount == 0 {
+            return;
+        }
+        let price = if token_amount == 0 { 0.0 } else { sol_amount as f64 / token_amount as f64 };
+        if self.own_fills.len() >= 16 {
+            self.own_fills.clear();
+        }
+        self.own_fills.insert(signature.to_string(), (token_amount, sol_amount, price));
+        self.own_fill_notify.notify_one();
+    }
+
+    pub fn own_fill(&self, signature: &str) -> Option<(u64, u64, f64)> {
+        self.own_fills.get(signature).copied()
     }
 
     pub fn record_target_trade(&mut self, event: &PoolTradeEvent) -> bool {
@@ -217,6 +241,23 @@ impl TokenInner {
         assert_transition(self.lifecycle, next)?;
         self.lifecycle = next;
         Ok(())
+    }
+
+    /// Enter `SELL_PREPARED` without passing through a state that cannot sell.
+    /// `SELL_SENT` means the fill already landed, so a new attempt must not rewind it.
+    pub fn begin_sell_attempt(&mut self) -> Result<()> {
+        match self.lifecycle {
+            Lifecycle::SellPrepared | Lifecycle::SellSent => Ok(()),
+            Lifecycle::BuyConfirmed => {
+                self.transition(Lifecycle::PositionActiveConfirmed)?;
+                self.transition(Lifecycle::SellPrepared)
+            }
+            Lifecycle::BuyProcessed => {
+                self.transition(Lifecycle::PositionActiveUnconfirmed)?;
+                self.transition(Lifecycle::SellPrepared)
+            }
+            _ => self.transition(Lifecycle::SellPrepared),
+        }
     }
 
     pub fn restore_position(&mut self, token_amount: u64, entry_price: f64, current_price: f64, entry_processed_ms: u64) {
@@ -298,5 +339,82 @@ impl TokenStateManager {
 
     pub fn remove(&mut self, program_id: &str, pool: &str) -> Option<usize> {
         self.states.remove(&pool_key(program_id, pool))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::StrategyV022Config;
+    use crate::events::{PoolDescriptor, PoolTradeEvent, Side};
+    use crate::strategy::engine::Engine;
+
+    fn holding_token() -> TokenInner {
+        let descriptor = PoolDescriptor {
+            mint: "mint".to_string(),
+            pool: "pool".to_string(),
+            program_id: "program".to_string(),
+            venue: "pump".to_string(),
+            token_program: None,
+            quote_mint: None,
+            pool_base_token_account: None,
+            pool_quote_token_account: None,
+            relevant_accounts: Vec::new(),
+        };
+        let target_buy = PoolTradeEvent {
+            signature: "sig".to_string(),
+            slot: 1,
+            transaction_index: None,
+            event_index: 0,
+            timestamp_ms: 0,
+            received_mono_ms: 0.0,
+            mint: descriptor.mint.clone(),
+            pool: descriptor.pool.clone(),
+            program_id: descriptor.program_id.clone(),
+            trader: "target".to_string(),
+            side: Side::Buy,
+            sol_amount: 1,
+            token_amount: 1,
+            price: 1.0,
+            curve_progress: None,
+            curve: None,
+            swap: None,
+        };
+        let engine = Engine::new_v022(StrategyV022Config::default_v022(), "me");
+        let mut token = TokenInner::new(descriptor, target_buy, 1_000, engine);
+        token.restore_position(1_000, 1.0, 1.0, 1);
+        token
+    }
+
+    #[test]
+    fn sell_retry_stays_in_sell_sent() {
+        let mut token = holding_token();
+        token.begin_sell_attempt().unwrap();
+        assert_eq!(token.lifecycle, Lifecycle::SellPrepared);
+        token.begin_sell_attempt().unwrap();
+        assert_eq!(token.lifecycle, Lifecycle::SellPrepared);
+
+        token.transition(Lifecycle::SellSent).unwrap();
+        token.begin_sell_attempt().unwrap();
+        assert_eq!(token.lifecycle, Lifecycle::SellSent);
+        assert!(assert_transition(Lifecycle::SellSent, Lifecycle::SellPrepared).is_err());
+
+        let mut confirmed = holding_token();
+        confirmed.lifecycle = Lifecycle::BuyConfirmed;
+        confirmed.begin_sell_attempt().unwrap();
+        assert_eq!(confirmed.lifecycle, Lifecycle::SellPrepared);
+
+        let mut processed = holding_token();
+        processed.lifecycle = Lifecycle::BuyProcessed;
+        processed.begin_sell_attempt().unwrap();
+        assert_eq!(processed.lifecycle, Lifecycle::SellPrepared);
+    }
+
+    #[test]
+    fn own_fill_is_readable_by_signature() {
+        let mut token = holding_token();
+        token.note_own_fill("sig-buy", 1_000, 400_000_000);
+        assert_eq!(token.own_fill("sig-buy"), Some((1_000, 400_000_000, 400_000.0)));
+        assert_eq!(token.own_fill("missing"), None);
     }
 }

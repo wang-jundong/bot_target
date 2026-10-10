@@ -54,17 +54,31 @@ impl BlockhashCache {
     }
 
     pub async fn get(&self) -> Result<solana_sdk::hash::Hash> {
-        let stale = {
-            let guard = self.current.lock().await;
-            match *guard {
-                Some((_, at)) => at.elapsed() > Duration::from_millis(self.refresh_ms.saturating_mul(2)),
-                None => true,
+        // A hash is valid for about a minute. The background refresh keeps it fresh.
+        // Blocking the sell on a refresh RPC whenever the cache is 20s old was the send delay.
+        if let Some((hash, at)) = *self.current.lock().await {
+            if cached_blockhash_is_usable(at.elapsed()) {
+                return Ok(hash);
             }
-        };
-        if stale {
-            self.refresh().await?;
         }
+        self.refresh().await?;
         self.current.lock().await.ok_or_else(|| anyhow!("blockhash unavailable")).map(|(hash, _)| hash)
+    }
+}
+
+fn cached_blockhash_is_usable(age: Duration) -> bool {
+    age <= Duration::from_secs(60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sell_uses_a_cached_blockhash_without_refreshing() {
+        assert!(cached_blockhash_is_usable(Duration::from_secs(20)));
+        assert!(cached_blockhash_is_usable(Duration::from_secs(60)));
+        assert!(!cached_blockhash_is_usable(Duration::from_secs(61)));
     }
 }
 
@@ -107,24 +121,35 @@ impl LiveExecution {
             let Some(prepared) = prepared else { last_error = "buy was not prepared".to_string(); continue };
             match self.submit_and_confirm(token, &prepared, true, attempt, None).await {
                 Ok((_signature, token_amount, sol_amount, price)) => {
-                    let mut state = token.lock().await;
-                    state.actual_token_amount = Some(token_amount);
-                    state.actual_entry_sol_amount = Some(sol_amount);
-                    state.prices.actual_entry_fill_price = Some(price);
-                    state.entry_processed_ms = Some(now_ms());
-                    state.transition(Lifecycle::BuyProcessed)?;
-                    state.transition(Lifecycle::PositionActiveUnconfirmed)?;
-                    self.record_critical(&state, "buy_processed", json!({ "fill": { "tokenAmount": token_amount.to_string(), "solAmount": sol_amount.to_string(), "price": price } })).await;
-                    state.transition(Lifecycle::BuyConfirmed)?;
-                    state.transition(Lifecycle::PositionActiveConfirmed)?;
-                    self.record(&state, "buy_confirmed", json!({}));
-                    let strategy_price = crate::events::to_strategy_price(price);
-                    let missed = state.engine.on_buy_fill(if strategy_price > 0.0 { strategy_price } else { 0.0 }, now_ms());
-                    if missed.is_some() {
-                        state.sell_after_fill = true;
-                    } else if state.sell_after_fill {
-                        state.engine.apply_missed_target_sell();
-                    }
+                    let (buy_processed, buy_confirmed) = {
+                        let mut state = token.lock().await;
+                        state.actual_token_amount = Some(token_amount);
+                        state.actual_entry_sol_amount = Some(sol_amount);
+                        state.prices.actual_entry_fill_price = Some(price);
+                        state.entry_processed_ms = Some(now_ms());
+                        state.transition(Lifecycle::BuyProcessed)?;
+                        state.transition(Lifecycle::PositionActiveUnconfirmed)?;
+                        let buy_processed = self.record_value(&state, "buy_processed", json!({ "fill": { "tokenAmount": token_amount.to_string(), "solAmount": sol_amount.to_string(), "price": price } }));
+                        state.transition(Lifecycle::BuyConfirmed)?;
+                        state.transition(Lifecycle::PositionActiveConfirmed)?;
+                        let buy_confirmed = self.record_value(&state, "buy_confirmed", json!({}));
+                        let strategy_price = crate::events::to_strategy_price(price);
+                        let missed = state.engine.on_buy_fill(if strategy_price > 0.0 { strategy_price } else { 0.0 }, now_ms());
+                        if missed.is_some() {
+                            state.sell_after_fill = true;
+                        } else if state.sell_after_fill {
+                            state.engine.apply_missed_target_sell();
+                        }
+                        (buy_processed, buy_confirmed)
+                    };
+                    // buy_sent is already on disk. Flushing these here used to sit in front of sell_after_fill.
+                    tracing::info!(value = %buy_processed, "{}", record_message("buy_processed"));
+                    tracing::info!(value = %buy_confirmed, "{}", record_message("buy_confirmed"));
+                    let journal = Arc::clone(&self.journal);
+                    tokio::spawn(async move {
+                        journal.record_critical(buy_processed).await;
+                        journal.record_critical(buy_confirmed).await;
+                    });
                     return Ok(());
                 }
                 Err(err) => {
@@ -159,50 +184,92 @@ impl LiveExecution {
             let prepared = {
                 let mut state = token.lock().await;
                 let slippage = state.sell_slippage_bps.unwrap_or(self.sell_slippage_bps);
-                let token_program = state.descriptor.token_program.clone().unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string()).parse()?;
+                let token_program: Pubkey = match state
+                    .descriptor
+                    .token_program
+                    .clone()
+                    .unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string())
+                    .parse()
+                {
+                    Ok(program) => program,
+                    Err(err) => {
+                        last_error = err.to_string();
+                        tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
+                        continue;
+                    }
+                };
                 let venue = state.descriptor.venue.clone();
                 let mint = state.descriptor.mint.clone();
-                state.prepared_sell = Some(self.venues.build_sell(&venue, &self.wallet.pubkey(), &mint, &token_program, amount, slippage)?);
-                if state.lifecycle != Lifecycle::SellPrepared {
-                    state.transition(Lifecycle::SellPrepared)?;
+                match self.venues.build_sell(&venue, &self.wallet.pubkey(), &mint, &token_program, amount, slippage) {
+                    Ok(built) => state.prepared_sell = Some(built),
+                    Err(err) => {
+                        last_error = err.to_string();
+                        state.prepared_sell = None;
+                        tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
+                        continue;
+                    }
+                }
+                if let Err(err) = state.begin_sell_attempt() {
+                    last_error = err.to_string();
+                    tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
+                    continue;
                 }
                 state.prepared_sell.clone()
             };
             let Some(prepared) = prepared else { continue };
             match self.submit_and_confirm(token, &prepared, false, attempt, Some(reason)).await {
                 Ok((_signature, token_amount, sol_amount, price)) => {
-                    let mut state = token.lock().await;
-                    state.prices.actual_exit_fill_price = Some(price);
-                    self.record_critical(&state, "position_closed", json!({ "reason": reason })).await;
-                    let closed_at = now_ms();
-                    if let (Some(entry_sol), Some(entry_price), Some(entry_ms)) = (state.actual_entry_sol_amount, state.prices.actual_entry_fill_price, state.entry_processed_ms) {
-                        let input = ClosedTradePnlInput {
-                            closed_at_ms: closed_at,
-                            descriptor: state.descriptor.clone(),
-                            buy_lamports: entry_sol,
-                            sell_lamports: sol_amount,
-                            token_amount,
-                            entry_price,
-                            exit_price: price,
-                            prices: state.prices.clone(),
-                            exit_reason: reason.to_string(),
-                            buy_signature: state.buy_signature.clone(),
-                            sell_signature: state.sell_signature.clone(),
-                            entry_processed_ms: entry_ms,
-                        };
-                        match self.pnl.record(input).await {
-                            Ok(()) => tracing::info!(mint = %state.descriptor.mint, "[PNL] Closed trade appended"),
-                            Err(err) => tracing::error!(error = %err, mint = %state.descriptor.mint, "[PNL] Failed to append closed trade"),
+                    let (closed, pnl, mint) = {
+                        let mut state = token.lock().await;
+                        state.prices.actual_exit_fill_price = Some(price);
+                        // SELL_SENT only after the fill is known. Marking it at submit time
+                        // made the first attempt illegal to continue when confirmation failed.
+                        if state.lifecycle == Lifecycle::SellPrepared {
+                            state.transition(Lifecycle::SellSent)?;
                         }
-                        let _ = create_pnl_record;
-                    }
-                    state.engine.on_sell_fill();
-                    state.sell_after_fill = false;
-                    state.clear_filled_position();
-                    state.reset_buy_send_claim();
-                    state.reset_sell_send_claim();
-                    state.transition(Lifecycle::TrackingPool)?;
-                    tracing::info!(mint = %state.descriptor.mint, "[REENTRY] Round finished; still watching for the next target buy");
+                        let closed = self.record_value(&state, "position_closed", json!({ "reason": reason }));
+                        let closed_at = now_ms();
+                        let pnl = if let (Some(entry_sol), Some(entry_price), Some(entry_ms)) = (state.actual_entry_sol_amount, state.prices.actual_entry_fill_price, state.entry_processed_ms) {
+                            Some(ClosedTradePnlInput {
+                                closed_at_ms: closed_at,
+                                descriptor: state.descriptor.clone(),
+                                buy_lamports: entry_sol,
+                                sell_lamports: sol_amount,
+                                token_amount,
+                                entry_price,
+                                exit_price: price,
+                                prices: state.prices.clone(),
+                                exit_reason: reason.to_string(),
+                                buy_signature: state.buy_signature.clone(),
+                                sell_signature: state.sell_signature.clone(),
+                                entry_processed_ms: entry_ms,
+                            })
+                        } else {
+                            None
+                        };
+                        state.engine.on_sell_fill();
+                        state.sell_after_fill = false;
+                        state.clear_filled_position();
+                        state.reset_buy_send_claim();
+                        state.reset_sell_send_claim();
+                        state.transition(Lifecycle::TrackingPool)?;
+                        let mint = state.descriptor.mint.clone();
+                        tracing::info!(mint = %mint, "[REENTRY] Round finished; still watching for the next target buy");
+                        (closed, pnl, mint)
+                    };
+                    tracing::info!(value = %closed, "{}", record_message("position_closed"));
+                    let journal = Arc::clone(&self.journal);
+                    let pnl_journal = Arc::clone(&self.pnl);
+                    tokio::spawn(async move {
+                        journal.record_critical(closed).await;
+                        if let Some(input) = pnl {
+                            match pnl_journal.record(input).await {
+                                Ok(()) => tracing::info!(mint = %mint, "[PNL] Closed trade appended"),
+                                Err(err) => tracing::error!(error = %err, mint = %mint, "[PNL] Failed to append closed trade"),
+                            }
+                            let _ = create_pnl_record;
+                        }
+                    });
                     return Ok(());
                 }
                 Err(err) => {
@@ -234,24 +301,25 @@ impl LiveExecution {
             Ok(pair) => pair,
             Err(err) => return Err(err),
         };
-        let (mint, venue) = {
+        let (mint, venue, sent_record) = {
             let mut state = token.lock().await;
-            if is_buy {
+            let (event, extra) = if is_buy {
                 state.buy_signature = Some(signature.clone());
                 state.transition(Lifecycle::BuySent)?;
-                self.record_critical(&state, "buy_sent", json!({ "attempt": attempt, "signature": signature, "fallback": fallback })).await;
+                ("buy_sent", json!({ "attempt": attempt, "signature": signature, "fallback": fallback }))
             } else {
                 state.sell_signature = Some(signature.clone());
-                state.transition(Lifecycle::SellSent)?;
-                self.record_critical(
-                    &state,
-                    "sell_sent",
-                    json!({ "attempt": attempt, "reason": sell_reason.unwrap_or(""), "signature": signature, "fallback": fallback }),
-                ).await;
-            }
-            (state.descriptor.mint.clone(), state.descriptor.venue.clone())
+                ("sell_sent", json!({ "attempt": attempt, "reason": sell_reason.unwrap_or(""), "signature": signature, "fallback": fallback }))
+            };
+            let value = self.record_value(&state, event, extra);
+            (state.descriptor.mint.clone(), state.descriptor.venue.clone(), value)
         };
-        let (token_amount, sol_amount, price) = self.confirm(&signature, &mint, &venue, fallback).await?;
+        tracing::info!(value = %sent_record, "{}", record_message(if is_buy { "buy_sent" } else { "sell_sent" }));
+        // Disk flush used to hold the token lock and run before confirmation polling.
+        let journal = Arc::clone(&self.journal);
+        let flush = async move { journal.record_critical(sent_record).await };
+        let ((), confirmed) = tokio::join!(flush, self.confirm(token, &signature, &mint, &venue, fallback));
+        let (token_amount, sol_amount, price) = confirmed?;
         if is_buy && token_amount == 0 {
             return Err(anyhow!("buy fill could not be determined"));
         }
@@ -293,11 +361,11 @@ impl LiveExecution {
         }
     }
 
-    async fn confirm(&self, signature: &str, mint: &str, venue: &str, fallback: bool) -> Result<(u64, u64, f64)> {
-        // bot_target: if status was seen but fill lagged, re-poll up to 3 outer rounds.
+    async fn confirm(&self, token: &Mutex<TokenInner>, signature: &str, mint: &str, venue: &str, fallback: bool) -> Result<(u64, u64, f64)> {
+        // If status was seen but fill lagged, re-poll up to 3 outer rounds.
         let mut last_err = anyhow!("confirmation timed out for {signature}");
         for poll in 1..=3 {
-            match self.wait_processed(signature, mint, venue, fallback).await {
+            match self.wait_processed(token, signature, mint, venue, fallback).await {
                 Ok(fill) => return Ok(fill),
                 Err(err) => {
                     let seen = err.downcast_ref::<ConfirmationTimeoutError>().map(|e| e.seen).unwrap_or(false);
@@ -312,14 +380,29 @@ impl LiveExecution {
         Err(last_err)
     }
 
-    async fn wait_processed(&self, signature: &str, mint: &str, venue: &str, fallback: bool) -> Result<(u64, u64, f64)> {
+    async fn wait_processed(&self, token: &Mutex<TokenInner>, signature: &str, mint: &str, venue: &str, fallback: bool) -> Result<(u64, u64, f64)> {
         let signature_parsed = Signature::from_str(signature)?;
         let started = Instant::now();
         let deadline = Duration::from_secs(30);
         let unseen_deadline = if fallback { Duration::from_secs(10) } else { deadline };
+        let notify = token.lock().await.own_fill_notify.clone();
         let mut seen = false;
         while started.elapsed() < deadline {
-            let statuses = self.rpc.get_signature_statuses_with_history(&[signature_parsed]).await?;
+            if let Some(fill) = token.lock().await.own_fill(signature) {
+                return Ok(fill);
+            }
+            let signatures = [signature_parsed];
+            let pending = self.rpc.get_signature_statuses_with_history(&signatures);
+            tokio::pin!(pending);
+            let statuses = tokio::select! {
+                _ = notify.notified() => {
+                    if let Some(fill) = token.lock().await.own_fill(signature) {
+                        return Ok(fill);
+                    }
+                    continue;
+                }
+                result = &mut pending => result?,
+            };
             if let Some(Some(status)) = statuses.value.first() {
                 seen = true;
                 if let Some(err) = &status.err {
@@ -329,18 +412,24 @@ impl LiveExecution {
                     status.confirmation_status,
                     Some(TransactionConfirmationStatus::Confirmed | TransactionConfirmationStatus::Finalized)
                 ) {
-                    match self
-                        .rpc
-                        .get_transaction_with_config(
-                            &signature_parsed,
-                            RpcTransactionConfig {
-                                encoding: Some(UiTransactionEncoding::Json),
-                                commitment: Some(CommitmentConfig::confirmed()),
-                                max_supported_transaction_version: Some(0),
-                            },
-                        )
-                        .await
-                    {
+                    let fetch = self.rpc.get_transaction_with_config(
+                        &signature_parsed,
+                        RpcTransactionConfig {
+                            encoding: Some(UiTransactionEncoding::Json),
+                            commitment: Some(CommitmentConfig::confirmed()),
+                            max_supported_transaction_version: Some(0),
+                        },
+                    );
+                    tokio::pin!(fetch);
+                    match tokio::select! {
+                        _ = notify.notified() => {
+                            if let Some(fill) = token.lock().await.own_fill(signature) {
+                                return Ok(fill);
+                            }
+                            continue;
+                        }
+                        result = &mut fetch => result,
+                    } {
                         Ok(tx) => {
                             if let Some(fill) = parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue) {
                                 return Ok(fill);
@@ -355,7 +444,10 @@ impl LiveExecution {
             } else if !seen && started.elapsed() >= unseen_deadline {
                 break;
             }
-            tokio::time::sleep(confirm_backoff(started.elapsed())).await;
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(confirm_backoff(started.elapsed())) => {}
+            }
         }
         Err(ConfirmationTimeoutError { signature: signature.to_string(), seen }.into())
     }
@@ -375,20 +467,6 @@ impl LiveExecution {
             return Ok(None);
         }
         Ok(parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue))
-    }
-
-    fn record(&self, state: &TokenInner, event: &str, extra: Value) {
-        let value = self.record_value(state, event, extra);
-        let message = record_message(event);
-        tracing::info!(%value, "{message}");
-        self.journal.record(value);
-    }
-
-    async fn record_critical(&self, state: &TokenInner, event: &str, extra: Value) {
-        let value = self.record_value(state, event, extra);
-        let message = record_message(event);
-        tracing::info!(%value, "{message}");
-        self.journal.record_critical(value).await;
     }
 
     fn record_value(&self, state: &TokenInner, event: &str, extra: Value) -> Value {
