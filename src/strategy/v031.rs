@@ -570,16 +570,16 @@ mod tests {
         let loaded = StrategyV031Config::default_v031();
         assert_eq!(loaded.gate_wallet, "3VUNtVtjjx5ckUojT7UocJ5fbuAJRsNUXNfTBnPte9vC");
         assert_eq!(loaded.min_entry_s, 4.0);
-        assert_eq!(loaded.max_entry_s, 20.0);
+        assert_eq!(loaded.max_entry_s, 16.0);
         assert_eq!(loaded.buy_hit_count, 4);
         assert_eq!(loaded.buy_hit_min, 1.0);
-        assert_eq!(loaded.sell_hit_count, 4);
+        assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 4.0);
-        assert_eq!(loaded.take_profit, 0.25);
-        assert_eq!(loaded.max_hold_s, 85.0);
-        assert!(loaded.first_cycle_only);
+        assert_eq!(loaded.take_profit, 0.4);
+        assert_eq!(loaded.max_hold_s, 45.0);
+        assert!(!loaded.first_cycle_only);
         assert!(!loaded.repeat_entries);
-        assert_eq!(loaded.size_sol, 0.4);
+        assert_eq!(loaded.size_sol, 0.5);
     }
 
     #[test]
@@ -616,12 +616,12 @@ mod tests {
     #[test]
     fn ends_cycle_when_window_finishes_after_clock() {
         let mut engine = bound(|_| {}, "");
-        assert_eq!(sells(&mut engine, "late", T0 + 20_001, 0.3), None);
+        assert_eq!(sells(&mut engine, "late", T0 + 16_001, 0.3), None);
         assert_eq!(engine.phase_name(), "wait");
         assert!(!engine.needs_pool_tape());
 
         let mut edge = bound(|_| {}, "");
-        assert_eq!(sells(&mut edge, "edge", T0 + 20_000, 0.3), Some("BUY"));
+        assert_eq!(sells(&mut edge, "edge", T0 + 16_000, 0.3), Some("BUY"));
     }
 
     #[test]
@@ -642,18 +642,18 @@ mod tests {
         let fill = 50e-9;
         tp.on_buy_fill(fill, T0 + 5_000);
         let mut under = print("SELL", 0.05, "under", T0 + 6_000);
-        under.price = fill * 1.2;
+        under.price = fill * 1.39;
         assert_eq!(tp.on_event(&under), None);
         let mut took = print("SELL", 0.05, "tp", T0 + 6_000);
-        took.price = fill * 1.25;
+        took.price = fill * 1.41;
         assert_eq!(tp.on_event(&took), Some("SELL"));
         assert_eq!(tp.last_sell_reason(), "take_profit");
 
         let mut held = bound(|cfg| cfg.take_profit = 0.0, "");
         arm(&mut held);
         held.on_buy_fill(fill, T0 + 5_000);
-        assert_eq!(held.on_clock(T0 + 5_000 + 84_999, fill), None);
-        assert_eq!(held.on_clock(T0 + 5_000 + 85_000, fill), Some("SELL"));
+        assert_eq!(held.on_clock(T0 + 5_000 + 44_999, fill), None);
+        assert_eq!(held.on_clock(T0 + 5_000 + 45_000, fill), Some("SELL"));
         assert_eq!(held.last_sell_reason(), "hold_time");
 
         let mut target = bound(|cfg| cfg.take_profit = 0.0, "");
@@ -668,12 +668,12 @@ mod tests {
         dumped.token_amount = 900.0;
         assert_eq!(target.on_event(&dumped), Some("SELL"));
         assert_eq!(target.last_sell_reason(), "target_sell");
-        assert_eq!(target.phase_name(), "done");
+        assert_eq!(target.phase_name(), "idle");
     }
 
     #[test]
     fn first_cycle_only_never_reopens() {
-        let mut engine = bound(|_| {}, "");
+        let mut engine = bound(|cfg| cfg.first_cycle_only = true, "");
         let mut flat = print("SELL", 1.0, "flat", T0 + 1_000);
         flat.wallet = "target".to_string();
         flat.token_amount = 1_000.0;
@@ -713,7 +713,7 @@ mod tests {
         let mut engine = bound(|cfg| cfg.take_profit = 0.0, "");
         arm(&mut engine);
         engine.on_buy_fill(50e-9, T0 + 5_000);
-        assert_eq!(buys(&mut engine, "exit", T0 + 6_000, 1.0, 4), Some("SELL"));
+        assert_eq!(buys(&mut engine, "exit", T0 + 6_000, 1.0, 5), Some("SELL"));
         engine.on_sell_failed(T0 + 6_000);
         assert_eq!(engine.phase_name(), "hold");
         assert_eq!(engine.on_clock(T0 + 7_000, 0.0), None);
@@ -729,11 +729,11 @@ mod tests {
         during.wallet = "target".to_string();
         during.token_amount = 1_000.0;
         assert_eq!(engine.on_event(&during), None);
-        assert_eq!(engine.phase_name(), "done");
+        assert_eq!(engine.phase_name(), "idle");
         engine.on_buy_fill(50e-9, T0 + 6_000);
         assert_eq!(engine.phase_name(), "hold");
         engine.apply_missed_target_sell();
-        assert_eq!(engine.phase_name(), "done");
+        assert_eq!(engine.phase_name(), "idle");
         assert_eq!(engine.last_sell_reason(), "target_sell");
     }
 }

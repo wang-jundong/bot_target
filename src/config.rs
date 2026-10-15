@@ -135,23 +135,24 @@ pub struct StrategyV031Config {
 }
 
 impl StrategyV031Config {
-    /// Same knobs as `bot_target` `src/config/strategyV031.ts`.
+    /// Knobs from scalpingbot `config/strategy_v_031.json` (2026-10-16 tune).
+    /// `size_sol` stays at the live position size, not the backtest size.
     pub fn default_v031() -> Self {
         let mut cfg = Self {
             gate_wallet: "3VUNtVtjjx5ckUojT7UocJ5fbuAJRsNUXNfTBnPte9vC".to_string(),
             dust_sol: 0.1,
             min_entry_s: 4.0,
-            max_entry_s: 20.0,
+            max_entry_s: 16.0,
             buy_hit_count: 4,
             buy_hit_min: 1.0,
-            sell_hit_count: 4,
+            sell_hit_count: 5,
             sell_hit_min: 4.0,
-            take_profit: 0.25,
-            max_hold_s: 85.0,
+            take_profit: 0.4,
+            max_hold_s: 45.0,
             target_sell_exit: true,
-            first_cycle_only: true,
+            first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.4,
+            size_sol: 0.5,
         };
         if cfg.buy_hit_count < 1 {
             cfg.buy_hit_count = 1;
