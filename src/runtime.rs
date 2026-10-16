@@ -363,6 +363,7 @@ impl TradingRuntime {
             StrategyName::V011 => Engine::new_v011(self.config.strategy_v011.clone()),
             StrategyName::V022 => Engine::new_v022(self.config.strategy_v022.clone(), own),
             StrategyName::V031 => Engine::new_v031(self.config.strategy_v031.clone(), own),
+            StrategyName::V051 => Engine::new_v051(self.config.strategy_v051.clone(), own),
         }
     }
 

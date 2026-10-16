@@ -11,6 +11,7 @@ pub enum StrategyName {
     V011,
     V022,
     V031,
+    V051,
 }
 
 impl StrategyName {
@@ -19,6 +20,7 @@ impl StrategyName {
             Self::V011 => "strategy_v_011",
             Self::V022 => "strategy_v_022",
             Self::V031 => "strategy_v_031",
+            Self::V051 => "strategy_v_051",
         }
     }
 
@@ -27,6 +29,7 @@ impl StrategyName {
             "strategy_v_011" => Some(Self::V011),
             "strategy_v_022" => Some(Self::V022),
             "strategy_v_031" => Some(Self::V031),
+            "strategy_v_051" => Some(Self::V051),
             _ => None,
         }
     }
@@ -164,6 +167,55 @@ impl StrategyV031Config {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StrategyV051Config {
+    pub gate_wallet: String,
+    pub dust_sol: f64,
+    pub min_entry_s: f64,
+    pub max_entry_s: f64,
+    pub buy_hit_count: u32,
+    pub buy_hit_min: f64,
+    pub sell_hit_count: u32,
+    pub sell_hit_min: f64,
+    pub take_profit: f64,
+    pub max_hold_s: f64,
+    pub target_sell_exit: bool,
+    pub first_cycle_only: bool,
+    pub repeat_entries: bool,
+    pub size_sol: f64,
+}
+
+impl StrategyV051Config {
+    /// Knobs from scalpingbot `config/strategy_v_051.json` (2026-10-16).
+    /// Zero `min_entry_s`, `max_entry_s`, and `max_hold_s` disable those caps.
+    /// `size_sol` is the live position size.
+    pub fn default_v051() -> Self {
+        let mut cfg = Self {
+            gate_wallet: "HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB".to_string(),
+            dust_sol: 0.1,
+            min_entry_s: 0.0,
+            max_entry_s: 0.0,
+            buy_hit_count: 4,
+            buy_hit_min: 1.0,
+            sell_hit_count: 5,
+            sell_hit_min: 4.0,
+            take_profit: 0.4,
+            max_hold_s: 0.0,
+            target_sell_exit: true,
+            first_cycle_only: false,
+            repeat_entries: false,
+            size_sol: 0.5,
+        };
+        if cfg.buy_hit_count < 1 {
+            cfg.buy_hit_count = 1;
+        }
+        if cfg.sell_hit_count < 1 {
+            cfg.sell_hit_count = 1;
+        }
+        cfg
+    }
+}
+
 pub struct StrategyPlan {
     pub name: StrategyName,
     pub target_wallet: String,
@@ -186,6 +238,7 @@ pub struct AppConfig {
     pub strategy_v011: StrategyV011Config,
     pub strategy_v022: StrategyV022Config,
     pub strategy_v031: StrategyV031Config,
+    pub strategy_v051: StrategyV051Config,
     pub blocked_mints: String,
     pub vibe_grpc_endpoint: String,
     pub vibe_grpc_token: String,
@@ -235,9 +288,16 @@ pub fn load_config() -> Result<AppConfig> {
     let strategy_v011 = StrategyV011Config::default_v011();
     let strategy_v022 = StrategyV022Config::default_v022();
     let strategy_v031 = StrategyV031Config::default_v031();
+    let strategy_v051 = StrategyV051Config::default_v051();
     let mut strategy_plans = Vec::with_capacity(active.len());
     for name in &active {
-        strategy_plans.push(build_plan(*name, &strategy_v011, &strategy_v022, &strategy_v031)?);
+        strategy_plans.push(build_plan(
+            *name,
+            &strategy_v011,
+            &strategy_v022,
+            &strategy_v031,
+            &strategy_v051,
+        )?);
     }
     let strategy_label = active.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ");
 
@@ -247,6 +307,7 @@ pub fn load_config() -> Result<AppConfig> {
         strategy_v011,
         strategy_v022,
         strategy_v031,
+        strategy_v051,
         blocked_mints: settings::BLOCKED_MINTS.to_string(),
         vibe_grpc_endpoint: vibe_endpoint,
         vibe_grpc_token: vibe_token,
@@ -285,6 +346,7 @@ fn build_plan(
     v011: &StrategyV011Config,
     v022: &StrategyV022Config,
     v031: &StrategyV031Config,
+    v051: &StrategyV051Config,
 ) -> Result<StrategyPlan> {
     let (target_wallet, size_sol, max_mc, target_sell_exit, first_cycle_only) = match name {
         StrategyName::V011 => (
@@ -307,6 +369,13 @@ fn build_plan(
             0.0,
             v031.target_sell_exit,
             v031.first_cycle_only,
+        ),
+        StrategyName::V051 => (
+            v051.gate_wallet.clone(),
+            v051.size_sol,
+            0.0,
+            v051.target_sell_exit,
+            v051.first_cycle_only,
         ),
     };
     if target_wallet.trim().len() < 32 {
@@ -343,6 +412,10 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
         StrategyName::V031 => (
             settings::STRATEGY_V_031_PRIVATE_KEY_ENCRYPTED,
             settings::STRATEGY_V_031_PRIVATE_KEY_BASE58,
+        ),
+        StrategyName::V051 => (
+            settings::STRATEGY_V_051_PRIVATE_KEY_ENCRYPTED,
+            settings::STRATEGY_V_051_PRIVATE_KEY_BASE58,
         ),
     };
     let private_key = if !encrypted.trim().is_empty() {

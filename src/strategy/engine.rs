@@ -1,15 +1,19 @@
 //! Unified strategy engine wrapper for runtime / execution / state.
 
-use crate::config::{StrategyName, StrategyV011Config, StrategyV022Config, StrategyV031Config};
+use crate::config::{
+    StrategyName, StrategyV011Config, StrategyV022Config, StrategyV031Config, StrategyV051Config,
+};
 use crate::strategy::common::MarketEvent;
 use crate::strategy::v011::{Decision, StrategyV011Engine};
 use crate::strategy::v022::StrategyV022Engine;
 use crate::strategy::v031::StrategyV031Engine;
+use crate::strategy::v051::StrategyV051Engine;
 
 pub enum Engine {
     V011(StrategyV011Engine),
     V022(StrategyV022Engine),
     V031(StrategyV031Engine),
+    V051(StrategyV051Engine),
 }
 
 impl Engine {
@@ -25,11 +29,16 @@ impl Engine {
         Self::V031(StrategyV031Engine::new(cfg, own_wallet))
     }
 
+    pub fn new_v051(cfg: StrategyV051Config, own_wallet: impl Into<String>) -> Self {
+        Self::V051(StrategyV051Engine::new(cfg, own_wallet))
+    }
+
     pub fn name(&self) -> StrategyName {
         match self {
             Self::V011(_) => StrategyName::V011,
             Self::V022(_) => StrategyName::V022,
             Self::V031(_) => StrategyName::V031,
+            Self::V051(_) => StrategyName::V051,
         }
     }
 
@@ -42,6 +51,7 @@ impl Engine {
             Self::V011(e) => e.phase_name().to_string(),
             Self::V022(e) => e.phase_name().to_string(),
             Self::V031(e) => e.phase_name().to_string(),
+            Self::V051(e) => e.phase_name().to_string(),
         }
     }
 
@@ -50,6 +60,7 @@ impl Engine {
             Self::V011(e) => e.needs_pool_tape(),
             Self::V022(e) => e.needs_pool_tape(),
             Self::V031(e) => e.needs_pool_tape(),
+            Self::V051(e) => e.needs_pool_tape(),
         }
     }
 
@@ -58,6 +69,7 @@ impl Engine {
             Self::V011(e) => e.phase_name() != crate::strategy::v011::PHASE_UNBOUND,
             Self::V022(e) => e.is_bound(),
             Self::V031(e) => e.is_bound(),
+            Self::V051(e) => e.is_bound(),
         }
     }
 
@@ -66,6 +78,7 @@ impl Engine {
             Self::V011(e) => e.is_done(),
             Self::V022(_) => false,
             Self::V031(e) => e.is_done(),
+            Self::V051(e) => e.is_done(),
         }
     }
 
@@ -74,6 +87,7 @@ impl Engine {
             Self::V011(e) => e.last_buy_reason(),
             Self::V022(e) => e.last_buy_reason(),
             Self::V031(e) => e.last_buy_reason(),
+            Self::V051(e) => e.last_buy_reason(),
         }
     }
 
@@ -82,6 +96,7 @@ impl Engine {
             Self::V011(e) => e.last_sell_reason(),
             Self::V022(e) => e.last_sell_reason(),
             Self::V031(e) => e.last_sell_reason(),
+            Self::V051(e) => e.last_sell_reason(),
         }
     }
 
@@ -90,13 +105,14 @@ impl Engine {
             Self::V011(e) => e.buy_size_sol(),
             Self::V022(e) => e.buy_size_sol(),
             Self::V031(e) => e.buy_size_sol(),
+            Self::V051(e) => e.buy_size_sol(),
         }
     }
 
     pub fn timer_ms(&self) -> u64 {
         match self {
             Self::V011(e) => e.timer_ms(),
-            Self::V022(_) | Self::V031(_) => 1_000,
+            Self::V022(_) | Self::V031(_) | Self::V051(_) => 1_000,
         }
     }
 
@@ -111,6 +127,10 @@ impl Engine {
                 e.on_buy_fill(fill_px, now_ms);
                 None
             }
+            Self::V051(e) => {
+                e.on_buy_fill(fill_px, now_ms);
+                None
+            }
         }
     }
 
@@ -119,6 +139,7 @@ impl Engine {
             Self::V011(_) => {}
             Self::V022(e) => e.apply_missed_target_sell(),
             Self::V031(e) => e.apply_missed_target_sell(),
+            Self::V051(e) => e.apply_missed_target_sell(),
         }
     }
 
@@ -127,6 +148,7 @@ impl Engine {
             Self::V011(e) => e.on_buy_failed(),
             Self::V022(e) => e.on_buy_failed(),
             Self::V031(e) => e.on_buy_failed(),
+            Self::V051(e) => e.on_buy_failed(),
         }
     }
 
@@ -135,6 +157,7 @@ impl Engine {
             Self::V011(e) => e.on_sell_fill(),
             Self::V022(e) => e.on_sell_fill(),
             Self::V031(e) => e.on_sell_fill(),
+            Self::V051(e) => e.on_sell_fill(),
         }
     }
 
@@ -143,6 +166,7 @@ impl Engine {
             Self::V011(e) => e.on_sell_failed(now_ms),
             Self::V022(e) => e.on_sell_failed(now_ms),
             Self::V031(e) => e.on_sell_failed(now_ms),
+            Self::V051(e) => e.on_sell_failed(now_ms),
         }
     }
 
@@ -153,6 +177,7 @@ impl Engine {
             }
             Self::V022(e) => e.restore_hold(entry_px),
             Self::V031(e) => e.restore_hold(entry_px, now_ms),
+            Self::V051(e) => e.restore_hold(entry_px, now_ms),
         }
     }
 
@@ -172,6 +197,7 @@ impl Engine {
             }
             Self::V022(e) => e.bind_gate(wallet, token_amount),
             Self::V031(e) => e.bind_gate(wallet, token_amount, price, now_ms),
+            Self::V051(e) => e.bind_gate(wallet, token_amount, price, now_ms),
         }
     }
 
@@ -185,6 +211,7 @@ impl Engine {
             },
             Self::V022(e) => e.on_event(event),
             Self::V031(e) => e.on_event(event),
+            Self::V051(e) => e.on_event(event),
         }
     }
 
@@ -208,6 +235,12 @@ impl Engine {
                 e.on_clock(now_ms)
             }
             Self::V031(e) => {
+                if !holding {
+                    return None;
+                }
+                e.on_clock(now_ms, mark_px)
+            }
+            Self::V051(e) => {
                 if !holding {
                     return None;
                 }

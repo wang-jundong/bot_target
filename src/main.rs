@@ -70,6 +70,23 @@ async fn main() -> anyhow::Result<()> {
                     "[01 STARTUP] Strategy knobs"
                 );
             }
+            bot_target::config::StrategyName::V051 => {
+                let c = &config.strategy_v051;
+                tracing::info!(
+                    strategy = plan.name.as_str(),
+                    target_wallet = %plan.target_wallet,
+                    size_sol = c.size_sol,
+                    min_entry_s = c.min_entry_s,
+                    max_entry_s = c.max_entry_s,
+                    buy_hit_count = c.buy_hit_count,
+                    buy_hit_min = c.buy_hit_min,
+                    sell_hit_count = c.sell_hit_count,
+                    sell_hit_min = c.sell_hit_min,
+                    take_profit = c.take_profit,
+                    max_hold_s = c.max_hold_s,
+                    "[01 STARTUP] Strategy knobs"
+                );
+            }
         }
     }
 
