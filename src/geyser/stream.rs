@@ -1,10 +1,14 @@
 //! Persistent Yellowstone/Geyser stream — transport matches New Folder:
-//! keepalive, in-place `sink.send` filter updates, 300s idle, 2s reconnect.
+//! keepalive, in-place `sink.send` filter updates, 300s without a transaction, 2s reconnect.
 //! Parsed transactions are forwarded on `outbound` for the strategy runtime.
+//!
+//! Pings and account updates do not refresh the transaction timer. Geyser sends
+//! those on an open socket even after it has stopped delivering trades, and
+//! treating them as liveness left the bot deaf for hours.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
@@ -144,11 +148,21 @@ async fn connect_and_pump(
         .join(", ");
     info!(%gates, pools = ctx.sub_state.watched_pools.len(), "[02 STREAM] geyser stream connected");
 
+    let mut last_tx = Instant::now();
     loop {
+        // Checked before select so a burst of pings or filter commands cannot
+        // postpone reconnect once the transaction feed has been quiet for IDLE.
+        if transaction_feed_expired(last_tx.elapsed(), false) {
+            anyhow::bail!(
+                "no geyser transactions for {}s — forcing reconnect",
+                IDLE.as_secs()
+            );
+        }
+        let quiet_for = IDLE.saturating_sub(last_tx.elapsed());
         tokio::select! {
-            _ = tokio::time::sleep(IDLE) => {
+            _ = tokio::time::sleep(quiet_for) => {
                 anyhow::bail!(
-                    "geyser idle for {}s (no updates/commands) — forcing reconnect",
+                    "no geyser transactions for {}s — forcing reconnect",
                     IDLE.as_secs()
                 );
             }
@@ -246,13 +260,24 @@ async fn connect_and_pump(
             }
             update = stream.next() => {
                 match update {
-                    Some(Ok(update)) => handle_update(ctx, update),
+                    Some(Ok(update)) => {
+                        let is_tx = matches!(update.update_oneof, Some(UpdateOneof::Transaction(_)));
+                        if is_tx {
+                            last_tx = Instant::now();
+                        }
+                        handle_update(ctx, update);
+                    }
                     Some(Err(status)) => anyhow::bail!("stream status error: {status}"),
                     None => return Ok(()),
                 }
             }
         }
     }
+}
+
+/// True when this message is not a transaction and the feed has been quiet for [`IDLE`].
+fn transaction_feed_expired(since_last_tx: Duration, is_transaction: bool) -> bool {
+    !is_transaction && since_last_tx >= IDLE
 }
 
 fn handle_update(ctx: &mut PumpCtx, update: SubscribeUpdate) {
@@ -291,5 +316,20 @@ fn handle_account_update(
                 ctx.venues.update_amm_vault(&mint.to_string(), is_base, amount);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pings_and_account_updates_do_not_keep_a_quiet_feed_alive() {
+        let almost = Duration::from_secs(299);
+        let idle = Duration::from_secs(300);
+        assert!(!transaction_feed_expired(almost, false));
+        assert!(transaction_feed_expired(idle, false));
+        assert!(!transaction_feed_expired(idle, true));
+        assert!(!transaction_feed_expired(Duration::from_secs(3_600), true));
     }
 }
