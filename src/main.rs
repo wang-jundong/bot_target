@@ -87,13 +87,41 @@ async fn main() -> anyhow::Result<()> {
                     "[01 STARTUP] Strategy knobs"
                 );
             }
+            bot_target::config::StrategyName::V071 => {
+                let c = &config.strategy_v071;
+                tracing::info!(
+                    strategy = plan.name.as_str(),
+                    target_wallet = %plan.target_wallet,
+                    size_sol = c.size_sol,
+                    min_entry_s = c.min_entry_s,
+                    max_entry_s = c.max_entry_s,
+                    min_mc_sol = c.min_mc_sol,
+                    max_mc_sol = c.max_mc_sol,
+                    sell_hit_count = c.sell_hit_count,
+                    sell_hit_min = c.sell_hit_min,
+                    take_profit = c.take_profit,
+                    max_hold_s = c.max_hold_s,
+                    second_buy_exit = c.second_buy_exit,
+                    repeat_entries = c.repeat_entries,
+                    "[01 STARTUP] Strategy knobs"
+                );
+            }
         }
     }
 
-    let rpc = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(config.helius_rpc_url.clone()));
-    let blockhashes = Arc::new(BlockhashCache::new(Arc::clone(&rpc), config.blockhash_refresh_ms));
+    let rpc = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
+        config.helius_rpc_url.clone(),
+    ));
+    let blockhashes = Arc::new(BlockhashCache::new(
+        Arc::clone(&rpc),
+        config.blockhash_refresh_ms,
+    ));
     blockhashes.spawn();
-    let venues = Arc::new(Venues::new(config.compute_unit_limit, config.priority_fee_lamports, config.helius_tip_lamports));
+    let venues = Arc::new(Venues::new(
+        config.compute_unit_limit,
+        config.priority_fee_lamports,
+        config.helius_tip_lamports,
+    ));
     let journal = Arc::new(RecoveryJournal::new(config.recovery_path.clone()));
     let pnl = Arc::new(PnlJournal::new(config.pnl_path.clone()));
 
@@ -114,7 +142,10 @@ async fn main() -> anyhow::Result<()> {
             buy_slippage_bps: config.buy_slippage_bps,
             sell_slippage_bps: config.sell_slippage_bps,
             blockhashes: Arc::clone(&blockhashes),
-            sender: HeliusSender::new(config.helius_sender_url.clone(), config.helius_sender_swqos_only),
+            sender: HeliusSender::new(
+                config.helius_sender_url.clone(),
+                config.helius_sender_swqos_only,
+            ),
             journal: Arc::clone(&journal),
             pnl: Arc::clone(&pnl),
             venues: Arc::clone(&venues),
@@ -123,7 +154,9 @@ async fn main() -> anyhow::Result<()> {
 
     let (commands_tx, commands_rx) = mpsc::channel(256);
     let (inbound_tx, inbound_rx) = mpsc::channel(4_096);
-    let geyser = GeyserHandle { commands: commands_tx };
+    let geyser = GeyserHandle {
+        commands: commands_tx,
+    };
     let endpoint = config.vibe_grpc_endpoint.clone();
     let token = config.vibe_grpc_token.clone();
     let venues_geyser = Arc::clone(&venues);

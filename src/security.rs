@@ -1,16 +1,16 @@
 //! Fernet + XOR wallet decryption, matching `bot_target` and cryptotrading_prod.
 
 use aes::Aes128;
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use cbc::{Decryptor, Encryptor};
-use cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
-use subtle::ConstantTimeEq;
 use std::fs;
 use std::path::Path;
+use subtle::ConstantTimeEq;
 
 const XOR_KEY: &[u8] = b"Djajsl09!2";
 
@@ -35,7 +35,9 @@ pub fn xor_encrypt(private_key: &str) -> Result<String> {
 }
 
 pub fn xor_decrypt(encrypted: &str) -> Result<String> {
-    let raw = STANDARD.decode(encrypted.trim()).context("xor payload is not base64")?;
+    let raw = STANDARD
+        .decode(encrypted.trim())
+        .context("xor payload is not base64")?;
     let out = xor_bytes(&raw, XOR_KEY)?;
     String::from_utf8(out).context("xor plaintext is not utf-8")
 }
@@ -46,7 +48,9 @@ fn to_url_safe(b64: &str) -> String {
 
 fn from_url_safe(b64: &str) -> Result<Vec<u8>> {
     let padded = b64.replace('-', "+").replace('_', "/");
-    STANDARD.decode(padded).context("fernet token is not base64")
+    STANDARD
+        .decode(padded)
+        .context("fernet token is not base64")
 }
 
 pub fn generate_fernet_key() -> String {
@@ -120,7 +124,8 @@ pub fn fernet_decrypt(key_material: &[u8], token: &str) -> Result<String> {
 
 pub fn encrypt_trading_private_key(plain_base58: &str, key_file_path: &Path) -> Result<String> {
     let key = if key_file_path.exists() {
-        let raw = fs::read(key_file_path).with_context(|| format!("read {}", key_file_path.display()))?;
+        let raw =
+            fs::read(key_file_path).with_context(|| format!("read {}", key_file_path.display()))?;
         String::from_utf8_lossy(&raw).trim().as_bytes().to_vec()
     } else {
         if let Some(parent) = key_file_path.parent() {

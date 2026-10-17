@@ -4,7 +4,7 @@
 
 use crate::config::StrategyV022Config;
 use crate::strategy::common::{
-    cursor_of, is_max_sell, is_strictly_after, round, ChainCursor, MarketEvent, SELL_RETRY_MS,
+    ChainCursor, MarketEvent, SELL_RETRY_MS, cursor_of, is_max_sell, is_strictly_after, round,
 };
 
 pub const STRATEGY_NAME: &str = "strategy_v_022";
@@ -92,12 +92,14 @@ impl StrategyV022Engine {
     }
 
     pub fn phase_name(&self) -> &'static str {
-        PHASE_NAMES.get(self.st.phase as usize).copied().unwrap_or("idle")
+        PHASE_NAMES
+            .get(self.st.phase as usize)
+            .copied()
+            .unwrap_or("idle")
     }
 
     pub fn needs_pool_tape(&self) -> bool {
-        self.exit_retry
-            || matches!(self.st.phase, PHASE_SEEK_SELL | PHASE_PENDING | PHASE_HOLD)
+        self.exit_retry || matches!(self.st.phase, PHASE_SEEK_SELL | PHASE_PENDING | PHASE_HOLD)
     }
 
     pub fn is_bound(&self) -> bool {
@@ -261,7 +263,10 @@ impl StrategyV022Engine {
     ) -> Option<&'static str> {
         if is_target
             && side == SIDE_BUY
-            && self.st.closed_at.is_some_and(|closed| !is_strictly_after(order, closed))
+            && self
+                .st
+                .closed_at
+                .is_some_and(|closed| !is_strictly_after(order, closed))
         {
             return None;
         }
@@ -278,7 +283,11 @@ impl StrategyV022Engine {
             let max_sell = is_max_sell(self.st.target_tokens, tokens);
             self.st.target_tokens = (self.st.target_tokens - tokens.max(0.0)).max(0.0);
             if max_sell {
-                if self.st.closed_at.is_none_or(|closed| is_strictly_after(order, closed)) {
+                if self
+                    .st
+                    .closed_at
+                    .is_none_or(|closed| is_strictly_after(order, closed))
+                {
                     self.st.closed_at = Some(order);
                 }
                 if self.st.phase == PHASE_HOLD && self.cfg.target_sell_exit {
@@ -369,10 +378,18 @@ impl StrategyV022Engine {
     }
 
     fn sell_already_passed(&self, order: ChainCursor) -> bool {
-        if self.st.opened_at.is_some_and(|opened| is_strictly_after(opened, order)) {
+        if self
+            .st
+            .opened_at
+            .is_some_and(|opened| is_strictly_after(opened, order))
+        {
             return true;
         }
-        if self.st.closed_at.is_some_and(|closed| is_strictly_after(closed, order)) {
+        if self
+            .st
+            .closed_at
+            .is_some_and(|closed| is_strictly_after(closed, order))
+        {
             return true;
         }
         false

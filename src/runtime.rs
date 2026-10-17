@@ -1,6 +1,8 @@
-use crate::config::{journal_record_matches_strategy, AppConfig, StrategyName};
-use crate::events::{lamports_to_sol, pool_key, sol_to_lamports_f64, to_strategy_price, PoolTradeEvent, Side};
-use crate::execution::{holding, LiveExecution};
+use crate::config::{AppConfig, StrategyName, journal_record_matches_strategy};
+use crate::events::{
+    PoolTradeEvent, Side, lamports_to_sol, pool_key, sol_to_lamports_f64, to_strategy_price,
+};
+use crate::execution::{LiveExecution, holding};
 use crate::geyser::{GeyserCommand, GeyserHandle};
 use crate::journal::RecoveryJournal;
 use crate::state::{Lifecycle, TokenInner};
@@ -16,7 +18,7 @@ use solana_sdk::signer::Signer;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 struct StrategySlot {
     name: StrategyName,
@@ -92,7 +94,9 @@ impl TradingRuntime {
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(tx) = rx.recv().await {
-                runtime.received.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                runtime
+                    .received
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Err(err) = runtime.handle(tx).await {
                     tracing::error!(error = %err, "[ERROR] Transaction processing failed");
                 }
@@ -186,7 +190,9 @@ impl TradingRuntime {
                     let slot = Arc::clone(slot);
                     let token = Arc::clone(&token);
                     tokio::spawn(async move {
-                        runtime.dispatch(slot, token, &key, &signal, &buy_reason, &sell_reason).await;
+                        runtime
+                            .dispatch(slot, token, &key, &signal, &buy_reason, &sell_reason)
+                            .await;
                     });
                 }
             }
@@ -195,16 +201,23 @@ impl TradingRuntime {
 
     async fn handle(self: &Arc<Self>, tx: crate::events::ParsedTargetTransaction) -> Result<()> {
         let trades = decoder::decode(&tx);
-        self.decoded.fetch_add(trades.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        self.decoded
+            .fetch_add(trades.len() as u64, std::sync::atomic::Ordering::Relaxed);
         for parsed in trades {
             let event = parsed.event;
             let descriptor = parsed.descriptor;
             if let Some(curve) = event.curve.clone() {
                 // Shared venue cache — any slot's execution venues work.
-                self.slots[0].execution.venues.note_curve(&descriptor.mint, curve);
+                self.slots[0]
+                    .execution
+                    .venues
+                    .note_curve(&descriptor.mint, curve);
             }
             if let Some(swap) = event.swap.clone() {
-                self.slots[0].execution.venues.note_swap(&descriptor.mint, swap);
+                self.slots[0]
+                    .execution
+                    .venues
+                    .note_swap(&descriptor.mint, swap);
             }
             let mut created = Vec::new();
             for slot in &self.slots {
@@ -258,7 +271,10 @@ impl TradingRuntime {
                 );
                 state.pool_tape_needed = Some(true);
             }
-            slot.tokens.lock().await.insert(key.clone(), Arc::clone(&token));
+            slot.tokens
+                .lock()
+                .await
+                .insert(key.clone(), Arc::clone(&token));
             self.mark_pool_needed(slot, &key, descriptor).await;
             // Gate buy only binds; later prints / timers decide entry.
             return Ok(true);
@@ -279,14 +295,19 @@ impl TradingRuntime {
                 return Ok(false);
             }
             state.prices.current_mark_price = Some(event.price);
-            let gate = event.signature == state.target_buy.signature && event.event_index == state.target_buy.event_index;
+            let gate = event.signature == state.target_buy.signature
+                && event.event_index == state.target_buy.event_index;
             if gate {
                 if !state.engine.is_bound() {
                     let price = to_strategy_price(event.price);
                     let sol = lamports_to_sol(event.sol_amount);
                     state.engine.bind_gate(
                         &slot.target_wallet,
-                        if event.side == Side::Buy { event.token_amount as f64 } else { 0.0 },
+                        if event.side == Side::Buy {
+                            event.token_amount as f64
+                        } else {
+                            0.0
+                        },
                         price,
                         sol,
                         &event.signature,
@@ -307,14 +328,9 @@ impl TradingRuntime {
                 let sol = lamports_to_sol(state.target_buy.sol_amount);
                 let gate_sig = state.target_buy.signature.clone();
                 let gate_ts = state.target_buy.timestamp_ms;
-                state.engine.bind_gate(
-                    &slot.target_wallet,
-                    0.0,
-                    price,
-                    sol,
-                    &gate_sig,
-                    gate_ts,
-                );
+                state
+                    .engine
+                    .bind_gate(&slot.target_wallet, 0.0, price, sol, &gate_sig, gate_ts);
             }
             let before = state.engine.phase_name();
             let market = to_market_event(event);
@@ -351,7 +367,9 @@ impl TradingRuntime {
             let slot = Arc::clone(slot);
             let token = Arc::clone(&token);
             tokio::spawn(async move {
-                runtime.dispatch(slot, token, &key, &signal, &buy_reason, &sell_reason).await;
+                runtime
+                    .dispatch(slot, token, &key, &signal, &buy_reason, &sell_reason)
+                    .await;
             });
         }
         Ok(false)
@@ -364,10 +382,16 @@ impl TradingRuntime {
             StrategyName::V022 => Engine::new_v022(self.config.strategy_v022.clone(), own),
             StrategyName::V031 => Engine::new_v031(self.config.strategy_v031.clone(), own),
             StrategyName::V051 => Engine::new_v051(self.config.strategy_v051.clone(), own),
+            StrategyName::V071 => Engine::new_v071(self.config.strategy_v071.clone(), own),
         }
     }
 
-    async fn mark_pool_needed(self: &Arc<Self>, slot: &StrategySlot, key: &str, descriptor: &crate::events::PoolDescriptor) {
+    async fn mark_pool_needed(
+        self: &Arc<Self>,
+        slot: &StrategySlot,
+        key: &str,
+        descriptor: &crate::events::PoolDescriptor,
+    ) {
         {
             let mut registered = self.registered.lock().await;
             let entry = registered
@@ -396,7 +420,9 @@ impl TradingRuntime {
         if should_unsubscribe {
             let runtime = Arc::clone(self);
             let key = key.to_string();
-            tokio::spawn(async move { runtime.release_pool(&key).await; });
+            tokio::spawn(async move {
+                runtime.release_pool(&key).await;
+            });
         }
     }
 
@@ -414,7 +440,13 @@ impl TradingRuntime {
         slot.pending_sells.lock().await.remove(key)
     }
 
-    fn spawn_pending_sell(self: &Arc<Self>, slot: Arc<StrategySlot>, token: Arc<Mutex<TokenInner>>, key: &str, reason: String) {
+    fn spawn_pending_sell(
+        self: &Arc<Self>,
+        slot: Arc<StrategySlot>,
+        token: Arc<Mutex<TokenInner>>,
+        key: &str,
+        reason: String,
+    ) {
         let runtime = Arc::clone(self);
         let key = key.to_string();
         tokio::spawn(async move {
@@ -444,7 +476,10 @@ impl TradingRuntime {
     ) {
         if !self.claim_busy(&slot, key).await {
             if signal == "SELL" {
-                slot.pending_sells.lock().await.insert(key.to_string(), sell_reason.to_string());
+                slot.pending_sells
+                    .lock()
+                    .await
+                    .insert(key.to_string(), sell_reason.to_string());
                 tracing::info!(%key, reason = sell_reason, "[08 EXIT] Queued sell while busy");
             }
             return;
@@ -458,7 +493,13 @@ impl TradingRuntime {
         }
     }
 
-    async fn buy(self: &Arc<Self>, slot: Arc<StrategySlot>, token: Arc<Mutex<TokenInner>>, key: &str, reason: &str) {
+    async fn buy(
+        self: &Arc<Self>,
+        slot: Arc<StrategySlot>,
+        token: Arc<Mutex<TokenInner>>,
+        key: &str,
+        reason: &str,
+    ) {
         let sent = self.buy_inner(&slot, &token, reason).await;
         let follow = {
             let state = token.lock().await;
@@ -471,7 +512,11 @@ impl TradingRuntime {
                 state.engine.last_sell_reason()
             };
             slot.pending_sells.lock().await.remove(key);
-            let reason = if sell_reason.is_empty() { "target_sell".to_string() } else { sell_reason };
+            let reason = if sell_reason.is_empty() {
+                "target_sell".to_string()
+            } else {
+                sell_reason
+            };
             self.sell(slot, token, key, &reason).await;
             return;
         }
@@ -480,7 +525,12 @@ impl TradingRuntime {
         }
     }
 
-    async fn buy_inner(&self, slot: &StrategySlot, token: &Mutex<TokenInner>, reason: &str) -> bool {
+    async fn buy_inner(
+        &self,
+        slot: &StrategySlot,
+        token: &Mutex<TokenInner>,
+        reason: &str,
+    ) -> bool {
         {
             let mut state = token.lock().await;
             if holding(&state) || !state.claim_buy_send() {
@@ -501,7 +551,10 @@ impl TradingRuntime {
             }
             let size = state.engine.buy_size_sol();
             state.buy_lamports = Some(sol_to_lamports_f64(size));
-            state.prices.entry_signal_price = state.prices.current_mark_price.or(Some(state.target_buy.price));
+            state.prices.entry_signal_price = state
+                .prices
+                .current_mark_price
+                .or(Some(state.target_buy.price));
             state.buy_slippage_bps = Some(self.config.buy_slippage_bps);
             state.sell_slippage_bps = Some(self.config.sell_slippage_bps);
             let strategy = state.strategy_name.clone();
@@ -509,9 +562,22 @@ impl TradingRuntime {
             let owner = slot.execution.wallet.pubkey();
             let mint = state.descriptor.mint.clone();
             let venue = state.descriptor.venue.clone();
-            let token_program = state.descriptor.token_program.clone().unwrap_or_else(|| (*crate::venues::ids::TOKEN_PROGRAM).to_string());
-            let token_program = token_program.parse().unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
-            match slot.execution.venues.build_buy(&venue, &owner, &mint, &token_program, state.buy_lamports.unwrap_or(0), self.config.buy_slippage_bps) {
+            let token_program = state
+                .descriptor
+                .token_program
+                .clone()
+                .unwrap_or_else(|| (*crate::venues::ids::TOKEN_PROGRAM).to_string());
+            let token_program = token_program
+                .parse()
+                .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
+            match slot.execution.venues.build_buy(
+                &venue,
+                &owner,
+                &mint,
+                &token_program,
+                state.buy_lamports.unwrap_or(0),
+                self.config.buy_slippage_bps,
+            ) {
                 Ok(prepared) => {
                     state.prepared_buy = Some(prepared);
                     if let Err(err) = state.transition(Lifecycle::BuyPrepared) {
@@ -543,7 +609,13 @@ impl TradingRuntime {
         true
     }
 
-    async fn sell(self: &Arc<Self>, slot: Arc<StrategySlot>, token: Arc<Mutex<TokenInner>>, key: &str, reason: &str) {
+    async fn sell(
+        self: &Arc<Self>,
+        slot: Arc<StrategySlot>,
+        token: Arc<Mutex<TokenInner>>,
+        key: &str,
+        reason: &str,
+    ) {
         {
             let mut state = token.lock().await;
             if !holding(&state) || !state.claim_sell_send() {
@@ -568,7 +640,13 @@ impl TradingRuntime {
     }
 
     fn can_open(&self, state: &TokenInner) -> bool {
-        let blocked: Vec<&str> = self.config.blocked_mints.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let blocked: Vec<&str> = self
+            .config
+            .blocked_mints
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         if blocked.iter().any(|mint| *mint == state.descriptor.mint) {
             tracing::warn!(mint = %state.descriptor.mint, "[05 ENTRY] Buy blocked: mint denylist");
             return false;
@@ -621,9 +699,12 @@ impl TradingRuntime {
         };
         let send = match self.geyser.commands.try_send(cmd) {
             Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => {
-                self.geyser.commands.send(cmd).await.map_err(|e| anyhow::anyhow!(e))
-            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => self
+                .geyser
+                .commands
+                .send(cmd)
+                .await
+                .map_err(|e| anyhow::anyhow!(e)),
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 anyhow::bail!("geyser command channel closed")
             }
@@ -639,31 +720,53 @@ impl TradingRuntime {
         Ok(())
     }
 
-    async fn resolve_amm_vaults(&self, descriptor: &crate::events::PoolDescriptor) -> Result<(Pubkey, Pubkey)> {
-        if let (Some(base), Some(quote)) = (&descriptor.pool_base_token_account, &descriptor.pool_quote_token_account) {
+    async fn resolve_amm_vaults(
+        &self,
+        descriptor: &crate::events::PoolDescriptor,
+    ) -> Result<(Pubkey, Pubkey)> {
+        if let (Some(base), Some(quote)) = (
+            &descriptor.pool_base_token_account,
+            &descriptor.pool_quote_token_account,
+        ) {
             return Ok((base.parse()?, quote.parse()?));
         }
         if let Some(swap) = self.slots[0].execution.venues.get_swap(&descriptor.mint) {
-            return Ok((swap.pool_base_token_account.parse()?, swap.pool_quote_token_account.parse()?));
+            return Ok((
+                swap.pool_base_token_account.parse()?,
+                swap.pool_quote_token_account.parse()?,
+            ));
         }
         let pool: Pubkey = descriptor.pool.parse()?;
         let account = self.rpc.get_account(&pool).await?;
         let parsed = crate::venues::ids::parse_amm_pool(&account.data)
             .ok_or_else(|| anyhow::anyhow!("unable to parse pumpswap pool {}", descriptor.pool))?;
-        Ok((parsed.pool_base_token_account, parsed.pool_quote_token_account))
+        Ok((
+            parsed.pool_base_token_account,
+            parsed.pool_quote_token_account,
+        ))
     }
 
     async fn release_pool(&self, key: &str) {
-        let Some((mint, holders)) = self.registered.lock().await.remove(key) else { return };
+        let Some((mint, holders)) = self.registered.lock().await.remove(key) else {
+            return;
+        };
         if !holders.is_empty() {
             // Race: someone re-needed it; put back.
-            self.registered.lock().await.insert(key.to_string(), (mint, holders));
+            self.registered
+                .lock()
+                .await
+                .insert(key.to_string(), (mint, holders));
             return;
         }
         if mint == Pubkey::default() {
             return;
         }
-        if let Err(err) = self.geyser.commands.send(GeyserCommand::Unregister { mint }).await {
+        if let Err(err) = self
+            .geyser
+            .commands
+            .send(GeyserCommand::Unregister { mint })
+            .await
+        {
             tracing::warn!(error = %err, %key, "[02 STREAM] Failed to unregister pool from geyser");
             return;
         }
@@ -673,11 +776,14 @@ impl TradingRuntime {
     async fn recover(&self) -> Result<()> {
         let records = self.journal.read().await?;
         let active: Vec<StrategyName> = self.slots.iter().map(|s| s.name).collect();
-        let mut latest: HashMap<(StrategyName, String), crate::journal::JournalRecord> = HashMap::new();
+        let mut latest: HashMap<(StrategyName, String), crate::journal::JournalRecord> =
+            HashMap::new();
         let mut last_buy_fill: HashMap<(StrategyName, String), String> = HashMap::new();
         let mut last_buy_sig: HashMap<(StrategyName, String), String> = HashMap::new();
         for record in records {
-            let Some(descriptor) = record.descriptor.clone() else { continue };
+            let Some(descriptor) = record.descriptor.clone() else {
+                continue;
+            };
             let key = pool_key(&descriptor.program_id, &descriptor.pool);
             let Some(slot) = self.slots.iter().find(|slot| {
                 journal_record_matches_strategy(record.strategy.as_deref(), slot.name, &active)
@@ -703,8 +809,12 @@ impl TradingRuntime {
             latest.insert(sk, record);
         }
         for ((strategy_name, key), record) in latest {
-            let Some(slot) = self.slots.iter().find(|s| s.name == strategy_name) else { continue };
-            let Some(descriptor) = record.descriptor.clone() else { continue };
+            let Some(slot) = self.slots.iter().find(|s| s.name == strategy_name) else {
+                continue;
+            };
+            let Some(descriptor) = record.descriptor.clone() else {
+                continue;
+            };
             if matches!(record.lifecycle.as_deref(), Some("CLOSED" | "FAILED")) {
                 continue;
             }
@@ -713,7 +823,11 @@ impl TradingRuntime {
                 .clone()
                 .or_else(|| last_buy_sig.get(&(strategy_name, key.clone())).cloned())
                 .or_else(|| record.signature.clone());
-            let mut recorded = record.actual_token_amount.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mut recorded = record
+                .actual_token_amount
+                .as_deref()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             let mut entry_price = record
                 .prices
                 .as_ref()
@@ -728,7 +842,11 @@ impl TradingRuntime {
             if (recorded == 0 || entry_price <= 0.0)
                 && let Some(sig) = buy_sig.as_deref()
             {
-                match slot.execution.fill_from_signature(sig, &descriptor.mint, &descriptor.venue).await {
+                match slot
+                    .execution
+                    .fill_from_signature(sig, &descriptor.mint, &descriptor.venue)
+                    .await
+                {
                     Ok(Some((token_amount, sol_amount, price))) => {
                         if recorded == 0 {
                             recorded = token_amount;
@@ -769,7 +887,11 @@ impl TradingRuntime {
                     }
                 }
             }
-            let token_amount = if recorded == 0 { wallet_amount } else { recorded.min(wallet_amount) };
+            let token_amount = if recorded == 0 {
+                wallet_amount
+            } else {
+                recorded.min(wallet_amount)
+            };
             if token_amount == 0 || entry_price <= 0.0 {
                 continue;
             }
@@ -788,7 +910,11 @@ impl TradingRuntime {
                 sol_amount: 0,
                 token_amount,
                 price: entry_price,
-                curve_progress: if descriptor.venue == "pumpswap" { Some(1.0) } else { None },
+                curve_progress: if descriptor.venue == "pumpswap" {
+                    Some(1.0)
+                } else {
+                    None
+                },
                 curve: None,
                 swap: None,
             };
@@ -812,10 +938,18 @@ impl TradingRuntime {
             state.restore_position(
                 token_amount,
                 entry_price,
-                record.prices.as_ref().and_then(|p| p.current_mark_price).unwrap_or(entry_price),
+                record
+                    .prices
+                    .as_ref()
+                    .and_then(|p| p.current_mark_price)
+                    .unwrap_or(entry_price),
                 record.entry_processed_ms.unwrap_or_else(now_ms),
             );
-            state.buy_lamports = record.buy_lamports.as_deref().and_then(|v| v.parse().ok()).or(Some(slot.buy_amount_lamports));
+            state.buy_lamports = record
+                .buy_lamports
+                .as_deref()
+                .and_then(|v| v.parse().ok())
+                .or(Some(slot.buy_amount_lamports));
             state.actual_entry_sol_amount = fill_sol;
             state.buy_signature = buy_sig;
             state.pool_tape_needed = Some(true);
@@ -825,11 +959,16 @@ impl TradingRuntime {
             }
             {
                 let mut registered = self.registered.lock().await;
-                let entry = registered.entry(key.clone()).or_insert_with(|| (mint, HashSet::new()));
+                let entry = registered
+                    .entry(key.clone())
+                    .or_insert_with(|| (mint, HashSet::new()));
                 entry.0 = mint;
                 entry.1.insert(slot.name.as_str());
             }
-            slot.tokens.lock().await.insert(key, Arc::new(Mutex::new(state)));
+            slot.tokens
+                .lock()
+                .await
+                .insert(key, Arc::new(Mutex::new(state)));
             tracing::warn!(strategy = strategy_name.as_str(), mint = %descriptor.mint, token_amount, "[07 POSITION] Recovered existing position");
         }
         Ok(())
@@ -842,10 +981,20 @@ impl TradingRuntime {
             .lock()
             .await
             .drain()
-            .filter_map(|(_, (mint, _))| if mint == Pubkey::default() { None } else { Some(mint) })
+            .filter_map(|(_, (mint, _))| {
+                if mint == Pubkey::default() {
+                    None
+                } else {
+                    Some(mint)
+                }
+            })
             .collect();
         for mint in mints {
-            let _ = self.geyser.commands.send(GeyserCommand::Unregister { mint }).await;
+            let _ = self
+                .geyser
+                .commands
+                .send(GeyserCommand::Unregister { mint })
+                .await;
         }
     }
 }

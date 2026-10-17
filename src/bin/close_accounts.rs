@@ -1,7 +1,9 @@
 use bot_target::config::load_config;
-use bot_target::venues::ids::{TOKEN_2022_PROGRAM, TOKEN_PROGRAM};
-use bot_target::venues::trade::{burn_instruction, close_account_instruction, compile_trade, harvest_withheld_instruction};
 use bot_target::state::PreparedTrade;
+use bot_target::venues::ids::{TOKEN_2022_PROGRAM, TOKEN_PROGRAM};
+use bot_target::venues::trade::{
+    burn_instruction, close_account_instruction, compile_trade, harvest_withheld_instruction,
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::Signer;
@@ -22,7 +24,9 @@ struct Account {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("Close token accounts owned by the trading wallet and return their rent.\n\nUsage:\n  close-accounts\n  close-accounts --dry-run\n  close-accounts --burn");
+        println!(
+            "Close token accounts owned by the trading wallet and return their rent.\n\nUsage:\n  close-accounts\n  close-accounts --dry-run\n  close-accounts --burn"
+        );
         return Ok(());
     }
     let burn = args.iter().any(|arg| arg == "--burn");
@@ -70,12 +74,27 @@ async fn main() -> anyhow::Result<()> {
             let mut instructions = Vec::new();
             for account in chunk {
                 if account.withheld > 0 {
-                    instructions.push(harvest_withheld_instruction(&account.mint, &account.address, &account.program));
+                    instructions.push(harvest_withheld_instruction(
+                        &account.mint,
+                        &account.address,
+                        &account.program,
+                    ));
                 }
                 if burn && account.amount > 0 && !account.native {
-                    instructions.push(burn_instruction(&account.address, &account.mint, &owner, account.amount, &account.program));
+                    instructions.push(burn_instruction(
+                        &account.address,
+                        &account.mint,
+                        &owner,
+                        account.amount,
+                        &account.program,
+                    ));
                 }
-                instructions.push(close_account_instruction(&account.address, &owner, &owner, &account.program));
+                instructions.push(close_account_instruction(
+                    &account.address,
+                    &owner,
+                    &owner,
+                    &account.program,
+                ));
             }
             let prepared = PreparedTrade {
                 instructions,
@@ -96,23 +115,53 @@ async fn main() -> anyhow::Result<()> {
 async fn load_accounts(rpc: &RpcClient, owner: &Pubkey) -> anyhow::Result<Vec<Account>> {
     let mut out = Vec::new();
     for program in [*TOKEN_PROGRAM, *TOKEN_2022_PROGRAM] {
-        let accounts = rpc.get_token_accounts_by_owner(owner, solana_client::rpc_request::TokenAccountsFilter::ProgramId(program)).await?;
+        let accounts = rpc
+            .get_token_accounts_by_owner(
+                owner,
+                solana_client::rpc_request::TokenAccountsFilter::ProgramId(program),
+            )
+            .await?;
         for keyed in accounts {
             let address: Pubkey = keyed.pubkey.parse()?;
-            let solana_account_decoder_client_types::UiAccountData::Json(parsed) = keyed.account.data else { continue };
-            let info = parsed.parsed.get("info").cloned().unwrap_or(serde_json::Value::Null);
-            let mint: Pubkey = info.get("mint").and_then(|v| v.as_str()).unwrap_or_default().parse()?;
-            let amount = info.pointer("/tokenAmount/amount").and_then(|v| v.as_str()).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let solana_account_decoder_client_types::UiAccountData::Json(parsed) =
+                keyed.account.data
+            else {
+                continue;
+            };
+            let info = parsed
+                .parsed
+                .get("info")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let mint: Pubkey = info
+                .get("mint")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .parse()?;
+            let amount = info
+                .pointer("/tokenAmount/amount")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             let frozen = info.get("state").and_then(|v| v.as_str()) == Some("frozen");
-            let native = info.get("isNative").map(|v| v.as_bool().unwrap_or(v.is_number())).unwrap_or(false) || mint == *bot_target::venues::ids::WSOL_MINT;
+            let native = info
+                .get("isNative")
+                .map(|v| v.as_bool().unwrap_or(v.is_number()))
+                .unwrap_or(false)
+                || mint == *bot_target::venues::ids::WSOL_MINT;
             let withheld = info
                 .get("extensions")
                 .and_then(|v| v.as_array())
                 .into_iter()
                 .flatten()
-                .find(|ext| ext.get("extension").and_then(|v| v.as_str()) == Some("transferFeeAmount"))
+                .find(|ext| {
+                    ext.get("extension").and_then(|v| v.as_str()) == Some("transferFeeAmount")
+                })
                 .and_then(|ext| ext.pointer("/state/withheldAmount"))
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
                 .unwrap_or(0);
             out.push(Account {
                 address,

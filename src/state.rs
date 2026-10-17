@@ -1,7 +1,7 @@
-use crate::events::{compare_events, event_key, pool_key, PoolDescriptor, PoolTradeEvent, Side};
+use crate::events::{PoolDescriptor, PoolTradeEvent, Side, compare_events, event_key, pool_key};
 use crate::journal::PositionPrices;
 use crate::strategy::engine::Engine;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
@@ -64,22 +64,56 @@ impl Lifecycle {
 pub fn assert_transition(from: Lifecycle, to: Lifecycle) -> Result<()> {
     let ok = match from {
         Lifecycle::TargetBuyDetected => matches!(to, Lifecycle::TrackingPool | Lifecycle::Failed),
-        Lifecycle::TrackingPool => matches!(to, Lifecycle::BuyPrepared | Lifecycle::Closed | Lifecycle::Failed),
-        Lifecycle::BuyPrepared => matches!(to, Lifecycle::BuySent | Lifecycle::TrackingPool | Lifecycle::Failed),
-        Lifecycle::BuySent => matches!(to, Lifecycle::BuyProcessed | Lifecycle::TrackingPool | Lifecycle::Failed),
-        Lifecycle::BuyProcessed => matches!(to, Lifecycle::PositionActiveUnconfirmed | Lifecycle::Failed),
-        Lifecycle::PositionActiveUnconfirmed => matches!(to, Lifecycle::BuyConfirmed | Lifecycle::SellPrepared | Lifecycle::Failed),
-        Lifecycle::BuyConfirmed => matches!(to, Lifecycle::PositionActiveConfirmed | Lifecycle::Failed),
-        Lifecycle::PositionActiveConfirmed => matches!(to, Lifecycle::SellPrepared | Lifecycle::SellSent | Lifecycle::Failed),
-        Lifecycle::SellPrepared => matches!(to, Lifecycle::BuyConfirmed | Lifecycle::PositionActiveConfirmed | Lifecycle::SellSent | Lifecycle::TrackingPool | Lifecycle::Failed),
+        Lifecycle::TrackingPool => matches!(
+            to,
+            Lifecycle::BuyPrepared | Lifecycle::Closed | Lifecycle::Failed
+        ),
+        Lifecycle::BuyPrepared => matches!(
+            to,
+            Lifecycle::BuySent | Lifecycle::TrackingPool | Lifecycle::Failed
+        ),
+        Lifecycle::BuySent => matches!(
+            to,
+            Lifecycle::BuyProcessed | Lifecycle::TrackingPool | Lifecycle::Failed
+        ),
+        Lifecycle::BuyProcessed => {
+            matches!(to, Lifecycle::PositionActiveUnconfirmed | Lifecycle::Failed)
+        }
+        Lifecycle::PositionActiveUnconfirmed => matches!(
+            to,
+            Lifecycle::BuyConfirmed | Lifecycle::SellPrepared | Lifecycle::Failed
+        ),
+        Lifecycle::BuyConfirmed => {
+            matches!(to, Lifecycle::PositionActiveConfirmed | Lifecycle::Failed)
+        }
+        Lifecycle::PositionActiveConfirmed => matches!(
+            to,
+            Lifecycle::SellPrepared | Lifecycle::SellSent | Lifecycle::Failed
+        ),
+        Lifecycle::SellPrepared => matches!(
+            to,
+            Lifecycle::BuyConfirmed
+                | Lifecycle::PositionActiveConfirmed
+                | Lifecycle::SellSent
+                | Lifecycle::TrackingPool
+                | Lifecycle::Failed
+        ),
         Lifecycle::SellSent => matches!(
             to,
-            Lifecycle::Closed | Lifecycle::TrackingPool | Lifecycle::PositionActiveConfirmed | Lifecycle::BuyPrepared | Lifecycle::Failed
+            Lifecycle::Closed
+                | Lifecycle::TrackingPool
+                | Lifecycle::PositionActiveConfirmed
+                | Lifecycle::BuyPrepared
+                | Lifecycle::Failed
         ),
         Lifecycle::Closed | Lifecycle::Failed => false,
     };
     if !ok {
-        bail!("invalid lifecycle transition {} -> {}", from.as_str(), to.as_str());
+        bail!(
+            "invalid lifecycle transition {} -> {}",
+            from.as_str(),
+            to.as_str()
+        );
     }
     Ok(())
 }
@@ -112,7 +146,11 @@ pub struct EventBuffer {
 
 impl EventBuffer {
     pub fn new(retention_ms: u64) -> Self {
-        Self { events: Vec::new(), keys: HashSet::new(), retention_ms }
+        Self {
+            events: Vec::new(),
+            keys: HashSet::new(),
+            retention_ms,
+        }
     }
 
     pub fn add(&mut self, event: PoolTradeEvent) -> bool {
@@ -120,12 +158,19 @@ impl EventBuffer {
         if !self.keys.insert(key) {
             return false;
         }
-        let insert_at = self.events.iter().position(|existing| compare_events(existing, &event).is_gt()).unwrap_or(self.events.len());
+        let insert_at = self
+            .events
+            .iter()
+            .position(|existing| compare_events(existing, &event).is_gt())
+            .unwrap_or(self.events.len());
         let cutoff = event.timestamp_ms.saturating_sub(self.retention_ms);
         self.events.insert(insert_at, event);
         let mut count = 0;
         while count < self.events.len() && self.events[count].timestamp_ms < cutoff {
-            self.keys.remove(&event_key(&self.events[count].signature, self.events[count].event_index));
+            self.keys.remove(&event_key(
+                &self.events[count].signature,
+                self.events[count].event_index,
+            ));
             count += 1;
         }
         if count > 0 {
@@ -166,7 +211,12 @@ pub struct TokenInner {
 }
 
 impl TokenInner {
-    pub fn new(descriptor: PoolDescriptor, target_buy: PoolTradeEvent, retention_ms: u64, engine: Engine) -> Self {
+    pub fn new(
+        descriptor: PoolDescriptor,
+        target_buy: PoolTradeEvent,
+        retention_ms: u64,
+        engine: Engine,
+    ) -> Self {
         let strategy_name = engine.strategy_name().to_string();
         let amount = target_buy.token_amount;
         let mut target_trades = HashSet::new();
@@ -204,11 +254,16 @@ impl TokenInner {
         if token_amount == 0 && sol_amount == 0 {
             return;
         }
-        let price = if token_amount == 0 { 0.0 } else { sol_amount as f64 / token_amount as f64 };
+        let price = if token_amount == 0 {
+            0.0
+        } else {
+            sol_amount as f64 / token_amount as f64
+        };
         if self.own_fills.len() >= 16 {
             self.own_fills.clear();
         }
-        self.own_fills.insert(signature.to_string(), (token_amount, sol_amount, price));
+        self.own_fills
+            .insert(signature.to_string(), (token_amount, sol_amount, price));
         self.own_fill_notify.notify_one();
     }
 
@@ -225,7 +280,9 @@ impl TokenInner {
             return false;
         }
         if event.side == Side::Buy {
-            self.target_observed_token_amount = self.target_observed_token_amount.saturating_add(event.token_amount);
+            self.target_observed_token_amount = self
+                .target_observed_token_amount
+                .saturating_add(event.token_amount);
         } else if event.token_amount >= self.target_observed_token_amount {
             self.target_observed_token_amount = 0;
         } else {
@@ -260,7 +317,13 @@ impl TokenInner {
         }
     }
 
-    pub fn restore_position(&mut self, token_amount: u64, entry_price: f64, current_price: f64, entry_processed_ms: u64) {
+    pub fn restore_position(
+        &mut self,
+        token_amount: u64,
+        entry_price: f64,
+        current_price: f64,
+        entry_processed_ms: u64,
+    ) {
         self.actual_token_amount = Some(token_amount);
         self.prices.actual_entry_fill_price = Some(entry_price);
         self.prices.current_mark_price = Some(current_price);
@@ -322,7 +385,10 @@ pub struct TokenStateManager {
 
 impl TokenStateManager {
     pub fn new(retention_ms: u64) -> Self {
-        Self { states: HashMap::new(), retention_ms }
+        Self {
+            states: HashMap::new(),
+            retention_ms,
+        }
     }
 
     pub fn retention_ms(&self) -> u64 {
@@ -414,7 +480,10 @@ mod tests {
     fn own_fill_is_readable_by_signature() {
         let mut token = holding_token();
         token.note_own_fill("sig-buy", 1_000, 400_000_000);
-        assert_eq!(token.own_fill("sig-buy"), Some((1_000, 400_000_000, 400_000.0)));
+        assert_eq!(
+            token.own_fill("sig-buy"),
+            Some((1_000, 400_000_000, 400_000.0))
+        );
         assert_eq!(token.own_fill("missing"), None);
     }
 }

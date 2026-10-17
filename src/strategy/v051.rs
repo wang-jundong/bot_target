@@ -7,7 +7,7 @@
 
 use crate::config::StrategyV051Config;
 use crate::strategy::common::{
-    cursor_of, is_max_sell, is_strictly_after, round, ChainCursor, MarketEvent, SELL_RETRY_MS,
+    ChainCursor, MarketEvent, SELL_RETRY_MS, cursor_of, is_max_sell, is_strictly_after, round,
 };
 
 pub const STRATEGY_NAME: &str = "strategy_v_051";
@@ -109,12 +109,14 @@ impl StrategyV051Engine {
     }
 
     pub fn phase_name(&self) -> &'static str {
-        PHASE_NAMES.get(self.st.phase as usize).copied().unwrap_or("idle")
+        PHASE_NAMES
+            .get(self.st.phase as usize)
+            .copied()
+            .unwrap_or("idle")
     }
 
     pub fn needs_pool_tape(&self) -> bool {
-        self.exit_retry
-            || matches!(self.st.phase, PHASE_SEEK_SELL | PHASE_PENDING | PHASE_HOLD)
+        self.exit_retry || matches!(self.st.phase, PHASE_SEEK_SELL | PHASE_PENDING | PHASE_HOLD)
     }
 
     pub fn is_bound(&self) -> bool {
@@ -358,7 +360,10 @@ impl StrategyV051Engine {
         self.st.now_ms = now_ms;
         if is_target
             && side == SIDE_BUY
-            && self.st.closed_at.is_some_and(|closed| !is_strictly_after(order, closed))
+            && self
+                .st
+                .closed_at
+                .is_some_and(|closed| !is_strictly_after(order, closed))
         {
             return None;
         }
@@ -375,7 +380,11 @@ impl StrategyV051Engine {
             let max_sell = is_max_sell(self.st.target_tokens, tokens);
             self.st.target_tokens = (self.st.target_tokens - tokens.max(0.0)).max(0.0);
             if max_sell && self.st.phase != PHASE_DONE {
-                if self.st.closed_at.is_none_or(|closed| is_strictly_after(order, closed)) {
+                if self
+                    .st
+                    .closed_at
+                    .is_none_or(|closed| is_strictly_after(order, closed))
+                {
                     self.st.closed_at = Some(order);
                 }
                 if self.st.phase == PHASE_HOLD
@@ -385,10 +394,7 @@ impl StrategyV051Engine {
                     self.after_max_sell();
                     return Some("SELL");
                 }
-                if matches!(
-                    self.st.phase,
-                    PHASE_SEEK_SELL | PHASE_PENDING | PHASE_WAIT
-                ) {
+                if matches!(self.st.phase, PHASE_SEEK_SELL | PHASE_PENDING | PHASE_WAIT) {
                     self.after_max_sell();
                     return None;
                 }
@@ -481,10 +487,18 @@ impl StrategyV051Engine {
     }
 
     fn sell_already_passed(&self, order: ChainCursor) -> bool {
-        if self.st.opened_at.is_some_and(|opened| is_strictly_after(opened, order)) {
+        if self
+            .st
+            .opened_at
+            .is_some_and(|opened| is_strictly_after(opened, order))
+        {
             return true;
         }
-        if self.st.closed_at.is_some_and(|closed| is_strictly_after(closed, order)) {
+        if self
+            .st
+            .closed_at
+            .is_some_and(|closed| is_strictly_after(closed, order))
+        {
             return true;
         }
         false
@@ -548,7 +562,12 @@ mod tests {
         engine
     }
 
-    fn sells(engine: &mut StrategyV051Engine, tag: &str, ts: u64, sol: f64) -> Option<&'static str> {
+    fn sells(
+        engine: &mut StrategyV051Engine,
+        tag: &str,
+        ts: u64,
+        sol: f64,
+    ) -> Option<&'static str> {
         let mut last = None;
         for i in 0..4 {
             last = engine.on_event(&print("SELL", sol, &format!("{tag}-{i}"), ts));
@@ -556,7 +575,13 @@ mod tests {
         last
     }
 
-    fn buys(engine: &mut StrategyV051Engine, tag: &str, ts: u64, sol: f64, count: usize) -> Option<&'static str> {
+    fn buys(
+        engine: &mut StrategyV051Engine,
+        tag: &str,
+        ts: u64,
+        sol: f64,
+        count: usize,
+    ) -> Option<&'static str> {
         let mut last = None;
         for i in 0..count {
             last = engine.on_event(&print("BUY", sol, &format!("{tag}-{i}"), ts));
@@ -587,7 +612,7 @@ mod tests {
         assert!(!loaded.first_cycle_only);
         assert!(loaded.target_sell_exit);
         assert!(!loaded.repeat_entries);
-        assert_eq!(loaded.size_sol, 0.5);
+        assert_eq!(loaded.size_sol, 1.0);
     }
 
     #[test]

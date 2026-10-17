@@ -1,7 +1,7 @@
 use crate::events::PoolDescriptor;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -79,7 +79,10 @@ pub struct RecoveryJournal {
 
 impl RecoveryJournal {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), pending: Arc::new(Mutex::new(())) }
+        Self {
+            path: path.into(),
+            pending: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Fire-and-forget append, matching bot_target RecoveryJournal.record().
@@ -122,7 +125,11 @@ async fn append_line(path: &Path, line: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(path).await?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
     file.write_all(line.as_bytes()).await?;
     file.flush().await?;
     Ok(())
@@ -195,7 +202,14 @@ pub fn create_pnl_record(input: ClosedTradePnlInput) -> Result<PnlRecord> {
         venue: input.descriptor.venue,
         token_program: input.descriptor.token_program,
         quote_mint: input.descriptor.quote_mint,
-        outcome: if pnl > 0 { "win" } else if pnl < 0 { "loss" } else { "flat" }.to_string(),
+        outcome: if pnl > 0 {
+            "win"
+        } else if pnl < 0 {
+            "loss"
+        } else {
+            "flat"
+        }
+        .to_string(),
         buy_lamports: input.buy_lamports.to_string(),
         sell_lamports: input.sell_lamports.to_string(),
         pnl_lamports: pnl.to_string(),
@@ -251,7 +265,10 @@ pub struct PnlJournal {
 
 impl PnlJournal {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), pending: Mutex::new(()) }
+        Self {
+            path: path.into(),
+            pending: Mutex::new(()),
+        }
     }
 
     pub async fn record(&self, input: ClosedTradePnlInput) -> Result<()> {

@@ -1,7 +1,7 @@
 use crate::bindings as settings;
 use crate::events::sol_to_lamports;
 use crate::security::decrypt_trading_private_key;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ pub enum StrategyName {
     V022,
     V031,
     V051,
+    V071,
 }
 
 impl StrategyName {
@@ -21,6 +22,7 @@ impl StrategyName {
             Self::V022 => "strategy_v_022",
             Self::V031 => "strategy_v_031",
             Self::V051 => "strategy_v_051",
+            Self::V071 => "strategy_v_071",
         }
     }
 
@@ -30,6 +32,7 @@ impl StrategyName {
             "strategy_v_022" => Some(Self::V022),
             "strategy_v_031" => Some(Self::V031),
             "strategy_v_051" => Some(Self::V051),
+            "strategy_v_071" => Some(Self::V071),
             _ => None,
         }
     }
@@ -155,7 +158,7 @@ impl StrategyV031Config {
             target_sell_exit: true,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.5,
+            size_sol: 1.0,
         };
         if cfg.buy_hit_count < 1 {
             cfg.buy_hit_count = 1;
@@ -204,11 +207,59 @@ impl StrategyV051Config {
             target_sell_exit: true,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.5,
+            size_sol: 1.0,
         };
         if cfg.buy_hit_count < 1 {
             cfg.buy_hit_count = 1;
         }
+        if cfg.sell_hit_count < 1 {
+            cfg.sell_hit_count = 1;
+        }
+        cfg
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyV071Config {
+    pub gate_wallet: String,
+    pub dust_sol: f64,
+    pub min_entry_s: f64,
+    pub max_entry_s: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
+    pub sell_hit_count: u32,
+    pub sell_hit_min: f64,
+    pub take_profit: f64,
+    pub max_hold_s: f64,
+    pub target_sell_exit: bool,
+    pub second_buy_exit: bool,
+    pub first_cycle_only: bool,
+    pub repeat_entries: bool,
+    pub size_sol: f64,
+}
+
+impl StrategyV071Config {
+    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-17).
+    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
+    /// `max_hold_s` disable those bounds. `size_sol` is the live position size.
+    pub fn default_v071() -> Self {
+        let mut cfg = Self {
+            gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
+            dust_sol: 0.8,
+            min_entry_s: 1.5,
+            max_entry_s: 45.0,
+            min_mc_sol: 25.0,
+            max_mc_sol: 60.0,
+            sell_hit_count: 5,
+            sell_hit_min: 8.0,
+            take_profit: 1.2,
+            max_hold_s: 0.0,
+            target_sell_exit: true,
+            second_buy_exit: false,
+            first_cycle_only: false,
+            repeat_entries: true,
+            size_sol: 0.5,
+        };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
         }
@@ -239,6 +290,7 @@ pub struct AppConfig {
     pub strategy_v022: StrategyV022Config,
     pub strategy_v031: StrategyV031Config,
     pub strategy_v051: StrategyV051Config,
+    pub strategy_v071: StrategyV071Config,
     pub blocked_mints: String,
     pub vibe_grpc_endpoint: String,
     pub vibe_grpc_token: String,
@@ -289,6 +341,7 @@ pub fn load_config() -> Result<AppConfig> {
     let strategy_v022 = StrategyV022Config::default_v022();
     let strategy_v031 = StrategyV031Config::default_v031();
     let strategy_v051 = StrategyV051Config::default_v051();
+    let strategy_v071 = StrategyV071Config::default_v071();
     let mut strategy_plans = Vec::with_capacity(active.len());
     for name in &active {
         strategy_plans.push(build_plan(
@@ -297,9 +350,14 @@ pub fn load_config() -> Result<AppConfig> {
             &strategy_v022,
             &strategy_v031,
             &strategy_v051,
+            &strategy_v071,
         )?);
     }
-    let strategy_label = active.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ");
+    let strategy_label = active
+        .iter()
+        .map(|n| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     Ok(AppConfig {
         strategy_label,
@@ -308,6 +366,7 @@ pub fn load_config() -> Result<AppConfig> {
         strategy_v022,
         strategy_v031,
         strategy_v051,
+        strategy_v071,
         blocked_mints: settings::BLOCKED_MINTS.to_string(),
         vibe_grpc_endpoint: vibe_endpoint,
         vibe_grpc_token: vibe_token,
@@ -347,6 +406,7 @@ fn build_plan(
     v022: &StrategyV022Config,
     v031: &StrategyV031Config,
     v051: &StrategyV051Config,
+    v071: &StrategyV071Config,
 ) -> Result<StrategyPlan> {
     let (target_wallet, size_sol, max_mc, target_sell_exit, first_cycle_only) = match name {
         StrategyName::V011 => (
@@ -376,6 +436,13 @@ fn build_plan(
             0.0,
             v051.target_sell_exit,
             v051.first_cycle_only,
+        ),
+        StrategyName::V071 => (
+            v071.gate_wallet.clone(),
+            v071.size_sol,
+            0.0,
+            v071.target_sell_exit,
+            v071.first_cycle_only,
         ),
     };
     if target_wallet.trim().len() < 32 {
@@ -417,11 +484,18 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
             settings::STRATEGY_V_051_PRIVATE_KEY_ENCRYPTED,
             settings::STRATEGY_V_051_PRIVATE_KEY_BASE58,
         ),
+        StrategyName::V071 => (
+            settings::STRATEGY_V_071_PRIVATE_KEY_ENCRYPTED,
+            settings::STRATEGY_V_071_PRIVATE_KEY_BASE58,
+        ),
     };
     let private_key = if !encrypted.trim().is_empty() {
-        decrypt_trading_private_key(encrypted.trim(), std::path::Path::new(settings::WALLET_KEY_FILE))?
-            .trim()
-            .to_string()
+        decrypt_trading_private_key(
+            encrypted.trim(),
+            std::path::Path::new(settings::WALLET_KEY_FILE),
+        )?
+        .trim()
+        .to_string()
     } else if !plain.trim().is_empty() {
         plain.trim().to_string()
     } else {
@@ -430,18 +504,24 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
             name.as_str()
         );
     };
-    let secret = bs58::decode(&private_key)
-        .into_vec()
-        .context(format!("{} trading private key is not base58", name.as_str()))?;
+    let secret = bs58::decode(&private_key).into_vec().context(format!(
+        "{} trading private key is not base58",
+        name.as_str()
+    ))?;
     if secret.len() != 64 {
-        bail!("{} trading private key must decode to 64 bytes", name.as_str());
+        bail!(
+            "{} trading private key must decode to 64 bytes",
+            name.as_str()
+        );
     }
     Keypair::try_from(secret.as_slice()).context(format!("{} trading private key", name.as_str()))
 }
 
 pub fn authenticated_helius_rpc_url(rpc_url: &str, api_key: &str) -> String {
     if let Ok(mut url) = reqwest::Url::parse(rpc_url) {
-        if url.host_str().unwrap_or("").ends_with("helius-rpc.com") && url.query_pairs().all(|(k, _)| k != "api-key") {
+        if url.host_str().unwrap_or("").ends_with("helius-rpc.com")
+            && url.query_pairs().all(|(k, _)| k != "api-key")
+        {
             url.query_pairs_mut().append_pair("api-key", api_key);
         }
         return url.to_string();
@@ -458,7 +538,11 @@ fn require_str(name: &str, value: &str) -> Result<String> {
 }
 
 /// Untagged journal records belong to the first active strategy.
-pub fn journal_record_matches_strategy(record_strategy: Option<&str>, slot_name: StrategyName, active: &[StrategyName]) -> bool {
+pub fn journal_record_matches_strategy(
+    record_strategy: Option<&str>,
+    slot_name: StrategyName,
+    active: &[StrategyName],
+) -> bool {
     match record_strategy {
         Some(value) => StrategyName::parse(value) == Some(slot_name),
         None => active.first().copied() == Some(slot_name),

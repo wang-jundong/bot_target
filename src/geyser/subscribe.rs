@@ -6,7 +6,8 @@ use std::collections::HashMap;
 
 use solana_sdk::pubkey::Pubkey;
 use yellowstone_grpc_proto::prelude::{
-    CommitmentLevel, SubscribeRequest, SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions,
+    CommitmentLevel, SubscribeRequest, SubscribeRequestFilterAccounts,
+    SubscribeRequestFilterTransactions,
 };
 
 #[derive(Debug, Clone, Default)]

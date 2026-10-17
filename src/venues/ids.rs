@@ -1,13 +1,20 @@
 use solana_sdk::pubkey::Pubkey;
 use std::sync::LazyLock;
 
-pub static PUMP_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| pubkey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"));
-pub static PUMP_AMM_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| pubkey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"));
-pub static PUMP_FEE_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| pubkey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"));
-pub static TOKEN_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
-pub static TOKEN_2022_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| pubkey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"));
-pub static ATA_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| pubkey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"));
-pub static WSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| pubkey("So11111111111111111111111111111111111111112"));
+pub static PUMP_PROGRAM: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"));
+pub static PUMP_AMM_PROGRAM: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"));
+pub static PUMP_FEE_PROGRAM: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"));
+pub static TOKEN_PROGRAM: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
+pub static TOKEN_2022_PROGRAM: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"));
+pub static ATA_PROGRAM: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"));
+pub static WSOL_MINT: LazyLock<Pubkey> =
+    LazyLock::new(|| pubkey("So11111111111111111111111111111111111111112"));
 
 pub static PUMP_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
     vec![
@@ -67,12 +74,16 @@ pub fn pump_fee_recipients(mayhem: bool) -> &'static [Pubkey] {
 }
 
 pub fn is_pump_fee_recipient(key: &Pubkey, mayhem: bool) -> bool {
-    pump_fee_recipients(mayhem).iter().any(|allowed| allowed == key)
+    pump_fee_recipients(mayhem)
+        .iter()
+        .any(|allowed| allowed == key)
 }
 
 #[allow(dead_code)]
 pub fn is_pump_buyback_fee_recipient(key: &Pubkey) -> bool {
-    PUMP_BUYBACK_FEE_RECIPIENTS.iter().any(|allowed| allowed == key)
+    PUMP_BUYBACK_FEE_RECIPIENTS
+        .iter()
+        .any(|allowed| allowed == key)
 }
 
 pub static HELIUS_TIP_ACCOUNTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
@@ -95,7 +106,10 @@ pub fn pda(program: &Pubkey, seeds: &[&[u8]]) -> Pubkey {
 }
 
 pub fn ata(owner: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
-    pda(&ATA_PROGRAM, &[owner.as_ref(), token_program.as_ref(), mint.as_ref()])
+    pda(
+        &ATA_PROGRAM,
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+    )
 }
 
 pub fn bonding_curve_pda(mint: &Pubkey) -> Pubkey {
@@ -143,15 +157,24 @@ pub fn amm_global_volume() -> Pubkey {
 }
 
 pub fn amm_user_volume(user: &Pubkey) -> Pubkey {
-    pda(&PUMP_AMM_PROGRAM, &[b"user_volume_accumulator", user.as_ref()])
+    pda(
+        &PUMP_AMM_PROGRAM,
+        &[b"user_volume_accumulator", user.as_ref()],
+    )
 }
 
 pub fn amm_fee_config() -> Pubkey {
-    pda(&PUMP_FEE_PROGRAM, &[b"fee_config", PUMP_AMM_PROGRAM.as_ref()])
+    pda(
+        &PUMP_FEE_PROGRAM,
+        &[b"fee_config", PUMP_AMM_PROGRAM.as_ref()],
+    )
 }
 
 pub fn coin_creator_vault_authority(coin_creator: &Pubkey) -> Pubkey {
-    pda(&PUMP_AMM_PROGRAM, &[b"creator_vault", coin_creator.as_ref()])
+    pda(
+        &PUMP_AMM_PROGRAM,
+        &[b"creator_vault", coin_creator.as_ref()],
+    )
 }
 
 pub fn pool_v2_pda(base_mint: &Pubkey) -> Pubkey {
@@ -166,7 +189,13 @@ pub fn canonical_pool_pda(mint: &Pubkey, quote_mint: &Pubkey) -> Pubkey {
     let index_bytes = 0u16.to_le_bytes();
     pda(
         &PUMP_AMM_PROGRAM,
-        &[b"pool", &index_bytes, pump_pool_authority(mint).as_ref(), mint.as_ref(), quote_mint.as_ref()],
+        &[
+            b"pool",
+            &index_bytes,
+            pump_pool_authority(mint).as_ref(),
+            mint.as_ref(),
+            quote_mint.as_ref(),
+        ],
     )
 }
 
@@ -191,7 +220,9 @@ pub fn parse_amm_pool(data: &[u8]) -> Option<AmmPoolAccount> {
     }
     let body = &data[8..];
     let read_pk = |at: usize| -> Option<Pubkey> {
-        Some(Pubkey::new_from_array(body.get(at..at + 32)?.try_into().ok()?))
+        Some(Pubkey::new_from_array(
+            body.get(at..at + 32)?.try_into().ok()?,
+        ))
     };
     Some(AmmPoolAccount {
         base_mint: read_pk(35)?,

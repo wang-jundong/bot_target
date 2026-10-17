@@ -1,17 +1,17 @@
+use base64::Engine;
 use bot_target::config::load_config;
-use bot_target::events::{mono_ms, PumpCurveSnapshot, PumpSwapSnapshot};
+use bot_target::events::{PumpCurveSnapshot, PumpSwapSnapshot, mono_ms};
 use bot_target::helius::HeliusSender;
 use bot_target::venues::ids::{
-    amm_global_config, bonding_curve_pda, canonical_pool_pda, parse_amm_global_config, parse_amm_pool,
-    PUMP_BUYBACK_FEE_RECIPIENTS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT,
+    PUMP_BUYBACK_FEE_RECIPIENTS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT, amm_global_config,
+    bonding_curve_pda, canonical_pool_pda, parse_amm_global_config, parse_amm_pool,
 };
 use bot_target::venues::trade::{build_amm_sell, build_pump_sell, compile_trade};
-use base64::Engine;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::Signer;
 use solana_sdk::signature::Signature;
+use solana_sdk::signer::Signer;
 use std::str::FromStr;
 
 #[tokio::main]
@@ -28,7 +28,9 @@ async fn main() -> anyhow::Result<()> {
     let mut index = 0;
     while index < args.len() {
         if args[index] == "--mint" {
-            let value = args.get(index + 1).ok_or_else(|| anyhow::anyhow!("--mint needs a mint address"))?;
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| anyhow::anyhow!("--mint needs a mint address"))?;
             only.push(value.parse::<Pubkey>()?.to_string());
             index += 2;
             continue;
@@ -40,7 +42,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let config = load_config()?;
     let rpc = RpcClient::new(config.helius_rpc_url.clone());
-    let sender = HeliusSender::new(config.helius_sender_url.clone(), config.helius_sender_swqos_only);
+    let sender = HeliusSender::new(
+        config.helius_sender_url.clone(),
+        config.helius_sender_swqos_only,
+    );
     let mut failed = 0usize;
     let mut seen = std::collections::HashSet::new();
     for plan in &config.strategy_plans {
@@ -51,14 +56,25 @@ async fn main() -> anyhow::Result<()> {
         println!("wallet strategy={} owner={owner}", plan.name.as_str());
         for program in [*TOKEN_PROGRAM, *TOKEN_2022_PROGRAM] {
             let accounts = rpc
-                .get_token_accounts_by_owner(&owner, solana_client::rpc_request::TokenAccountsFilter::ProgramId(program))
+                .get_token_accounts_by_owner(
+                    &owner,
+                    solana_client::rpc_request::TokenAccountsFilter::ProgramId(program),
+                )
                 .await?;
             for keyed in accounts {
-                let solana_account_decoder_client_types::UiAccountData::Json(parsed) = keyed.account.data else {
+                let solana_account_decoder_client_types::UiAccountData::Json(parsed) =
+                    keyed.account.data
+                else {
                     continue;
                 };
-                let info = parsed.parsed.get("info").cloned().unwrap_or(serde_json::Value::Null);
-                let Some(mint_str) = info.get("mint").and_then(|v| v.as_str()) else { continue };
+                let info = parsed
+                    .parsed
+                    .get("info")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let Some(mint_str) = info.get("mint").and_then(|v| v.as_str()) else {
+                    continue;
+                };
                 if mint_str == WSOL_MINT.to_string() {
                     println!("skip {mint_str} reason=wrapped SOL");
                     continue;
@@ -83,7 +99,10 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 };
                 let venue = if curve.0 { "pumpswap" } else { "pump" };
-                println!("sell {mint_str} amount={amount} venue={venue}{}", if dry_run { " dry-run" } else { "" });
+                println!(
+                    "sell {mint_str} amount={amount} venue={venue}{}",
+                    if dry_run { " dry-run" } else { "" }
+                );
                 if dry_run {
                     continue;
                 }
@@ -139,7 +158,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 };
-                match rpc.confirm_transaction(&Signature::from_str(&signature)?).await {
+                match rpc
+                    .confirm_transaction(&Signature::from_str(&signature)?)
+                    .await
+                {
                     Ok(true) => println!("ok mint={mint_str} signature={signature}"),
                     Ok(false) => {
                         failed += 1;
@@ -159,9 +181,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn fetch_curve(rpc: &RpcClient, mint: &Pubkey) -> anyhow::Result<Option<(bool, PumpCurveSnapshot)>> {
+async fn fetch_curve(
+    rpc: &RpcClient,
+    mint: &Pubkey,
+) -> anyhow::Result<Option<(bool, PumpCurveSnapshot)>> {
     let account = rpc.get_account(&bonding_curve_pda(mint)).await.ok();
-    let Some(account) = account else { return Ok(None) };
+    let Some(account) = account else {
+        return Ok(None);
+    };
     if account.data.len() < 8 + 8 * 5 + 1 + 32 {
         return Ok(None);
     }
@@ -189,12 +216,18 @@ async fn fetch_curve(rpc: &RpcClient, mint: &Pubkey) -> anyhow::Result<Option<(b
     )))
 }
 
-async fn fetch_amm_swap(rpc: &RpcClient, mint: &Pubkey, base_program: &Pubkey) -> anyhow::Result<PumpSwapSnapshot> {
+async fn fetch_amm_swap(
+    rpc: &RpcClient,
+    mint: &Pubkey,
+    base_program: &Pubkey,
+) -> anyhow::Result<PumpSwapSnapshot> {
     let pool = canonical_pool_pda(mint, &WSOL_MINT);
     let pool_account = rpc.get_account(&pool).await?;
-    let parsed = parse_amm_pool(&pool_account.data).ok_or_else(|| anyhow::anyhow!("unable to parse pumpswap pool for {mint}"))?;
+    let parsed = parse_amm_pool(&pool_account.data)
+        .ok_or_else(|| anyhow::anyhow!("unable to parse pumpswap pool for {mint}"))?;
     let global_account = rpc.get_account(&amm_global_config()).await?;
-    let global = parse_amm_global_config(&global_account.data).ok_or_else(|| anyhow::anyhow!("unable to parse pumpswap global config"))?;
+    let global = parse_amm_global_config(&global_account.data)
+        .ok_or_else(|| anyhow::anyhow!("unable to parse pumpswap global config"))?;
     let base_bal = token_amount(rpc, &parsed.pool_base_token_account).await?;
     let quote_bal = token_amount(rpc, &parsed.pool_quote_token_account).await?;
     let protocol = global
@@ -202,7 +235,10 @@ async fn fetch_amm_swap(rpc: &RpcClient, mint: &Pubkey, base_program: &Pubkey) -
         .into_iter()
         .find(|k| *k != Pubkey::default())
         .unwrap_or(global.protocol_fee_recipients[0]);
-    let buyback = PUMP_BUYBACK_FEE_RECIPIENTS.first().copied().unwrap_or_default();
+    let buyback = PUMP_BUYBACK_FEE_RECIPIENTS
+        .first()
+        .copied()
+        .unwrap_or_default();
     Ok(PumpSwapSnapshot {
         pool: pool.to_string(),
         base_mint: parsed.base_mint.to_string(),

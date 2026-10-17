@@ -3,7 +3,7 @@
 //! Faithful port of bot_target StrategyV011Engine. One instance per mint.
 
 use crate::config::StrategyV011Config;
-use crate::strategy::common::{is_max_sell, round, MarketEvent, SELL_RETRY_MS};
+use crate::strategy::common::{MarketEvent, SELL_RETRY_MS, is_max_sell, round};
 
 pub const STRATEGY_NAME: &str = "strategy_v_011";
 
@@ -207,15 +207,21 @@ impl StrategyV011Engine {
     }
 
     fn skip(detail: impl Into<String>) -> Decision {
-        Decision::Skip { detail: detail.into() }
+        Decision::Skip {
+            detail: detail.into(),
+        }
     }
 
     fn fire_buy(reason: impl Into<String>) -> Decision {
-        Decision::FireBuy { reason: reason.into() }
+        Decision::FireBuy {
+            reason: reason.into(),
+        }
     }
 
     fn fire_sell(reason: impl Into<String>) -> Decision {
-        Decision::FireSell { reason: reason.into() }
+        Decision::FireSell {
+            reason: reason.into(),
+        }
     }
 
     fn apply_decision(&mut self, decision: Decision) -> Decision {
@@ -427,7 +433,11 @@ impl StrategyV011Engine {
             ));
         }
 
-        let end_ret = if self.px0 > 0.0 { px / self.px0 - 1.0 } else { 0.0 };
+        let end_ret = if self.px0 > 0.0 {
+            px / self.px0 - 1.0
+        } else {
+            0.0
+        };
         if max_chase > 0.0 && end_ret >= max_chase {
             return Self::none();
         }
@@ -531,7 +541,11 @@ impl StrategyV011Engine {
         if mark_px > 0.0 {
             self.note_price(mark_px);
         }
-        let px = if mark_px > 0.0 { mark_px } else { self.last_mark_px };
+        let px = if mark_px > 0.0 {
+            mark_px
+        } else {
+            self.last_mark_px
+        };
 
         if self.phase == PHASE_HOLDING || (self.entry_price > 0.0 && !self.entry_done) {
             if self.phase == PHASE_HOLDING {
@@ -597,7 +611,15 @@ mod tests {
         StrategyV011Config::default_v011()
     }
 
-    fn event(side: &'static str, wallet: &str, sol: f64, tokens: f64, price: f64, sig: &str, ts: u64) -> MarketEvent {
+    fn event(
+        side: &'static str,
+        wallet: &str,
+        sol: f64,
+        tokens: f64,
+        price: f64,
+        sig: &str,
+        ts: u64,
+    ) -> MarketEvent {
         MarketEvent {
             signature: sig.to_string(),
             slot: 1,
@@ -635,7 +657,10 @@ mod tests {
         let config = cfg();
         bind(&mut engine, 1_000_000.0, T0);
         let early = (config.min_entry_s - 0.5) * 1000.0;
-        assert!(matches!(engine.on_timer(50e-9, T0 + early as u64), Decision::None));
+        assert!(matches!(
+            engine.on_timer(50e-9, T0 + early as u64),
+            Decision::None
+        ));
         let late = (config.min_entry_s + 0.5) * 1000.0;
         let decision = engine.on_timer(50e-9, T0 + late as u64);
         match decision {
@@ -684,10 +709,16 @@ mod tests {
         assert!(matches!(enter(&mut engine, T0), Decision::FireBuy { .. }));
         engine.on_buy_fill(50e-9);
         let px = 50e-9 * (1.0 + config.take_profit + 0.01);
-        assert!(matches!(engine.on_timer(px, T0 + 8_000), Decision::FireSell { .. }));
+        assert!(matches!(
+            engine.on_timer(px, T0 + 8_000),
+            Decision::FireSell { .. }
+        ));
         engine.on_sell_failed(T0 + 8_000);
         assert!(matches!(engine.on_timer(px, T0 + 8_000), Decision::None));
-        assert!(matches!(engine.on_timer(px, T0 + 10_000), Decision::FireSell { .. }));
+        assert!(matches!(
+            engine.on_timer(px, T0 + 10_000),
+            Decision::FireSell { .. }
+        ));
         assert_eq!(engine.phase_name(), PHASE_HOLDING);
     }
 
@@ -697,7 +728,15 @@ mod tests {
         assert!(matches!(enter(&mut engine, T0), Decision::FireBuy { .. }));
         engine.on_buy_fill(50e-9);
         let partial = engine.on_event(
-            &event("SELL", "target", 0.4, 100_000.0, 50e-9, "partial", T0 + 7_000),
+            &event(
+                "SELL",
+                "target",
+                0.4,
+                100_000.0,
+                50e-9,
+                "partial",
+                T0 + 7_000,
+            ),
             true,
         );
         assert!(matches!(partial, Decision::None));
@@ -720,7 +759,15 @@ mod tests {
         let each = config.sell_hit_min / f64::from(config.sell_hit_count) + 0.05;
         for i in 0..config.sell_hit_count - 1 {
             let d = engine.on_event(
-                &event("BUY", "other", each, 1_000.0, 50e-9, &format!("buy-{i}"), T0 + 7_000 + u64::from(i)),
+                &event(
+                    "BUY",
+                    "other",
+                    each,
+                    1_000.0,
+                    50e-9,
+                    &format!("buy-{i}"),
+                    T0 + 7_000 + u64::from(i),
+                ),
                 true,
             );
             assert!(matches!(d, Decision::None));
@@ -760,7 +807,10 @@ mod tests {
         let early = rearm_at + ((config.min_entry_s - 0.5) * 1000.0) as u64;
         assert!(matches!(engine.on_timer(60e-9, early), Decision::None));
         let late = rearm_at + ((config.min_entry_s + 0.5) * 1000.0) as u64;
-        assert!(matches!(engine.on_timer(60e-9, late), Decision::FireBuy { .. }));
+        assert!(matches!(
+            engine.on_timer(60e-9, late),
+            Decision::FireBuy { .. }
+        ));
     }
 
     #[test]
@@ -768,7 +818,15 @@ mod tests {
         let mut engine = StrategyV011Engine::new(cfg());
         assert!(matches!(enter(&mut engine, T0), Decision::FireBuy { .. }));
         let sold = engine.on_event(
-            &event("SELL", "target", 3.0, 1_000_000.0, 50e-9, "dump", T0 + 6_000),
+            &event(
+                "SELL",
+                "target",
+                3.0,
+                1_000_000.0,
+                50e-9,
+                "dump",
+                T0 + 6_000,
+            ),
             false,
         );
         assert!(matches!(sold, Decision::None));

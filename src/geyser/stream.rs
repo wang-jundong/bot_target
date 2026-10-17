@@ -22,7 +22,8 @@ use crate::events::ParsedTargetTransaction;
 use crate::venues::Venues;
 
 use super::parser::{
-    account_data, account_pubkey, bonding_curve_from_account_data, parse_transaction, token_account_amount,
+    account_data, account_pubkey, bonding_curve_from_account_data, parse_transaction,
+    token_account_amount,
 };
 use super::subscribe::{SubscriptionState, build_request};
 
@@ -57,12 +58,8 @@ pub struct GeyserHandle {
 
 #[derive(Clone, Copy)]
 enum WatchedMint {
-    Curve {
-        mint: Pubkey,
-    },
-    Amm {
-        mint: Pubkey,
-    },
+    Curve { mint: Pubkey },
+    Amm { mint: Pubkey },
 }
 
 #[derive(Clone, Copy)]
@@ -288,7 +285,10 @@ fn handle_update(ctx: &mut PumpCtx, update: SubscribeUpdate) {
                 if ctx.outbound.try_send(parsed).is_err() {
                     ctx.dropped = ctx.dropped.saturating_add(1);
                     if ctx.dropped == 1 || ctx.dropped % 100 == 0 {
-                        warn!(dropped = ctx.dropped, "[02 STREAM] Inbound queue full; dropping tx");
+                        warn!(
+                            dropped = ctx.dropped,
+                            "[02 STREAM] Inbound queue full; dropping tx"
+                        );
                     }
                 }
             }
@@ -301,9 +301,15 @@ fn handle_account_update(
     ctx: &mut PumpCtx,
     acc: yellowstone_grpc_proto::prelude::SubscribeUpdateAccount,
 ) {
-    let Some(pubkey) = account_pubkey(&acc) else { return };
-    let Some(reserve_ref) = ctx.reserve_accounts.get(&pubkey).copied() else { return };
-    let Some(data) = account_data(&acc) else { return };
+    let Some(pubkey) = account_pubkey(&acc) else {
+        return;
+    };
+    let Some(reserve_ref) = ctx.reserve_accounts.get(&pubkey).copied() else {
+        return;
+    };
+    let Some(data) = account_data(&acc) else {
+        return;
+    };
 
     match reserve_ref {
         ReserveAccountRef::Curve { mint } => {
@@ -313,7 +319,8 @@ fn handle_account_update(
         }
         ReserveAccountRef::AmmVault { mint, is_base } => {
             if let Some(amount) = token_account_amount(data) {
-                ctx.venues.update_amm_vault(&mint.to_string(), is_base, amount);
+                ctx.venues
+                    .update_amm_vault(&mint.to_string(), is_base, amount);
             }
         }
     }

@@ -83,7 +83,11 @@ pub fn event_key(signature: &str, event_index: u32) -> String {
 pub fn compare_events(a: &PoolTradeEvent, b: &PoolTradeEvent) -> std::cmp::Ordering {
     a.slot
         .cmp(&b.slot)
-        .then(a.transaction_index.unwrap_or(u64::MAX).cmp(&b.transaction_index.unwrap_or(u64::MAX)))
+        .then(
+            a.transaction_index
+                .unwrap_or(u64::MAX)
+                .cmp(&b.transaction_index.unwrap_or(u64::MAX)),
+        )
         .then(a.event_index.cmp(&b.event_index))
         .then(a.received_mono_ms.total_cmp(&b.received_mono_ms))
 }
@@ -145,7 +149,12 @@ pub fn sol_to_lamports(value: &str) -> anyhow::Result<u64> {
     let value = value.trim();
     let ok = value
         .split_once('.')
-        .map(|(whole, frac)| !whole.is_empty() && whole.chars().all(|c| c.is_ascii_digit()) && (1..=9).contains(&frac.len()) && frac.chars().all(|c| c.is_ascii_digit()))
+        .map(|(whole, frac)| {
+            !whole.is_empty()
+                && whole.chars().all(|c| c.is_ascii_digit())
+                && (1..=9).contains(&frac.len())
+                && frac.chars().all(|c| c.is_ascii_digit())
+        })
         .unwrap_or_else(|| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()));
     if !ok {
         anyhow::bail!("SOL value must be a non-negative decimal with <=9 places");
@@ -172,7 +181,11 @@ pub fn sol_to_lamports_f64(sol: f64) -> u64 {
 }
 
 pub fn to_strategy_price(live_price: f64) -> f64 {
-    if live_price > 0.0 { live_price * LIVE_PRICE_TO_STRATEGY } else { 0.0 }
+    if live_price > 0.0 {
+        live_price * LIVE_PRICE_TO_STRATEGY
+    } else {
+        0.0
+    }
 }
 
 pub fn mono_ms() -> f64 {

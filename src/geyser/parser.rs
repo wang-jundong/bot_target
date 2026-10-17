@@ -6,36 +6,84 @@ use yellowstone_grpc_proto::prelude::{
     CompiledInstruction, InnerInstruction, SubscribeUpdateAccount, SubscribeUpdateTransactionInfo,
 };
 
-pub fn parse_transaction(slot: u64, info: Option<&SubscribeUpdateTransactionInfo>) -> Option<ParsedTargetTransaction> {
+pub fn parse_transaction(
+    slot: u64,
+    info: Option<&SubscribeUpdateTransactionInfo>,
+) -> Option<ParsedTargetTransaction> {
     let info = info?;
-    if info.meta.as_ref().and_then(|meta| meta.err.as_ref()).is_some() {
+    if info
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.err.as_ref())
+        .is_some()
+    {
         return None;
     }
     let message = info.transaction.as_ref()?.message.as_ref()?;
-    let mut account_keys: Vec<String> = message.account_keys.iter().map(|key| bs58::encode(key).into_string()).collect();
+    let mut account_keys: Vec<String> = message
+        .account_keys
+        .iter()
+        .map(|key| bs58::encode(key).into_string())
+        .collect();
     if let Some(meta) = info.meta.as_ref() {
-        account_keys.extend(meta.loaded_writable_addresses.iter().map(|key| bs58::encode(key).into_string()));
-        account_keys.extend(meta.loaded_readonly_addresses.iter().map(|key| bs58::encode(key).into_string()));
+        account_keys.extend(
+            meta.loaded_writable_addresses
+                .iter()
+                .map(|key| bs58::encode(key).into_string()),
+        );
+        account_keys.extend(
+            meta.loaded_readonly_addresses
+                .iter()
+                .map(|key| bs58::encode(key).into_string()),
+        );
     }
     let instructions: Vec<CompiledIx> = message.instructions.iter().map(compiled_ix).collect();
-    let inner_instructions = info.meta.as_ref().map(|meta| {
-        meta.inner_instructions.iter().flat_map(|group| group.instructions.iter().map(inner_ix)).collect()
-    }).unwrap_or_default();
-    let program_ids = instructions.iter().filter_map(|ix| account_keys.get(ix.program_id_index).cloned()).collect();
-    let post_token_balances = info.meta.as_ref().map(|meta| {
-        meta.post_token_balances.iter().map(|balance| TokenBalanceInfo {
-            account_index: balance.account_index as usize,
-            mint: balance.mint.clone(),
-            owner: balance.owner.clone(),
-            program_id: balance.program_id.clone(),
-            amount: balance.ui_token_amount.as_ref().and_then(|ui| ui.amount.parse().ok()).unwrap_or(0),
-        }).collect()
-    }).unwrap_or_default();
-    let logs = info.meta.as_ref().map(|meta| meta.log_messages.clone()).unwrap_or_default();
+    let inner_instructions = info
+        .meta
+        .as_ref()
+        .map(|meta| {
+            meta.inner_instructions
+                .iter()
+                .flat_map(|group| group.instructions.iter().map(inner_ix))
+                .collect()
+        })
+        .unwrap_or_default();
+    let program_ids = instructions
+        .iter()
+        .filter_map(|ix| account_keys.get(ix.program_id_index).cloned())
+        .collect();
+    let post_token_balances = info
+        .meta
+        .as_ref()
+        .map(|meta| {
+            meta.post_token_balances
+                .iter()
+                .map(|balance| TokenBalanceInfo {
+                    account_index: balance.account_index as usize,
+                    mint: balance.mint.clone(),
+                    owner: balance.owner.clone(),
+                    program_id: balance.program_id.clone(),
+                    amount: balance
+                        .ui_token_amount
+                        .as_ref()
+                        .and_then(|ui| ui.amount.parse().ok())
+                        .unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let logs = info
+        .meta
+        .as_ref()
+        .map(|meta| meta.log_messages.clone())
+        .unwrap_or_default();
     Some(ParsedTargetTransaction {
         signature: bs58::encode(&info.signature).into_string(),
         slot,
-        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
         account_keys,
         program_ids,
         logs,

@@ -1,11 +1,11 @@
 use super::ids::{
-    amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume, amm_user_volume, ata, bonding_curve_pda,
-    coin_creator_vault_authority, is_pump_fee_recipient, pool_v2_pda, PUMP_AMM_PROGRAM, PUMP_FEE_PROGRAM, PUMP_PROGRAM,
-    TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
+    PUMP_AMM_PROGRAM, PUMP_FEE_PROGRAM, PUMP_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
+    amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume, amm_user_volume,
+    ata, bonding_curve_pda, coin_creator_vault_authority, is_pump_fee_recipient, pool_v2_pda,
 };
 use crate::events::{
-    mono_ms, CompiledIx, ParsedTargetTransaction, PoolDescriptor, PoolTradeEvent, PumpCurveSnapshot, PumpSwapSnapshot, Side,
-    TokenBalanceInfo,
+    CompiledIx, ParsedTargetTransaction, PoolDescriptor, PoolTradeEvent, PumpCurveSnapshot,
+    PumpSwapSnapshot, Side, TokenBalanceInfo, mono_ms,
 };
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashSet;
@@ -46,19 +46,25 @@ impl<'a> Cursor<'a> {
         self.u8().map(|v| v != 0)
     }
     fn u64(&mut self) -> Option<u64> {
-        self.take(8).map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        self.take(8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
     }
     fn i64(&mut self) -> Option<i64> {
-        self.take(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+        self.take(8)
+            .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
     }
     fn i128(&mut self) -> Option<i128> {
-        self.take(16).map(|b| i128::from_le_bytes(b.try_into().unwrap()))
+        self.take(16)
+            .map(|b| i128::from_le_bytes(b.try_into().unwrap()))
     }
     fn pubkey(&mut self) -> Option<Pubkey> {
-        self.take(32).map(|b| Pubkey::new_from_array(b.try_into().unwrap()))
+        self.take(32)
+            .map(|b| Pubkey::new_from_array(b.try_into().unwrap()))
     }
     fn string(&mut self) -> Option<String> {
-        let len = self.take(4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))? as usize;
+        let len = self
+            .take(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))? as usize;
         let bytes = self.take(len)?;
         Some(String::from_utf8_lossy(bytes).into_owned())
     }
@@ -73,8 +79,13 @@ pub fn decode(tx: &ParsedTargetTransaction) -> Vec<ParsedTrade> {
     let mut trades = Vec::new();
     let mut event_index = 0u32;
     for log in &tx.logs {
-        let Some(encoded) = log.strip_prefix("Program data: ") else { continue };
-        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) else { continue };
+        let Some(encoded) = log.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        else {
+            continue;
+        };
         if bytes.len() < 8 {
             continue;
         }
@@ -155,7 +166,18 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
     };
     let quote_reserves = virtual_quote.filter(|v| *v > 0).unwrap_or(virtual_sol);
     let price = ratio(quote_reserves, virtual_token);
-    let mut event = base_event(tx, event_index, &descriptor, &user.to_string(), is_buy, sol_amount, token_amount, price, None, timestamp);
+    let mut event = base_event(
+        tx,
+        event_index,
+        &descriptor,
+        &user.to_string(),
+        is_buy,
+        sol_amount,
+        token_amount,
+        price,
+        None,
+        timestamp,
+    );
     if let Some(creator) = creator {
         // Drop invalid fee recipients (e.g. System Program / quote mint) so trades never trust them.
         let fee_recipient = fee_recipient.and_then(|key| {
@@ -181,7 +203,12 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
     Some(ParsedTrade { descriptor, event })
 }
 
-fn amm_trade(tx: &ParsedTargetTransaction, is_buy: bool, body: &[u8], event_index: u32) -> Option<ParsedTrade> {
+fn amm_trade(
+    tx: &ParsedTargetTransaction,
+    is_buy: bool,
+    body: &[u8],
+    event_index: u32,
+) -> Option<ParsedTrade> {
     let mut c = Cursor::new(body);
     let timestamp = c.i64()?;
     let base_amount = c.u64()?;
@@ -236,8 +263,26 @@ fn amm_trade(tx: &ParsedTargetTransaction, is_buy: bool, body: &[u8], event_inde
         relevant_accounts: vec![pool_s.clone(), vaults.0.mint.clone()],
     };
     let price = ratio(pool_quote, pool_base);
-    let mut event = base_event(tx, event_index, &descriptor, &user.to_string(), is_buy, quote_amount, base_amount, price, Some(1.0), timestamp);
-    if let Some(buyback) = buyback_recipient(tx, &pool_s, &user.to_string(), &vaults, &coin_creator, &protocol_recipient) {
+    let mut event = base_event(
+        tx,
+        event_index,
+        &descriptor,
+        &user.to_string(),
+        is_buy,
+        quote_amount,
+        base_amount,
+        price,
+        Some(1.0),
+        timestamp,
+    );
+    if let Some(buyback) = buyback_recipient(
+        tx,
+        &pool_s,
+        &user.to_string(),
+        &vaults,
+        &coin_creator,
+        &protocol_recipient,
+    ) {
         event.swap = Some(PumpSwapSnapshot {
             pool: pool_s,
             base_mint: vaults.0.mint.clone(),
@@ -267,30 +312,71 @@ struct Vault {
     program_id: String,
 }
 
-fn pool_vaults(tx: &ParsedTargetTransaction, pool: &str, base_reserve: u64, quote_reserve: u64) -> Option<(Vault, Vault)> {
-    let owned: Vec<&TokenBalanceInfo> = tx.post_token_balances.iter().filter(|b| b.owner == pool).collect();
-    let source: Vec<&TokenBalanceInfo> = if owned.is_empty() { tx.post_token_balances.iter().collect() } else { owned };
+fn pool_vaults(
+    tx: &ParsedTargetTransaction,
+    pool: &str,
+    base_reserve: u64,
+    quote_reserve: u64,
+) -> Option<(Vault, Vault)> {
+    let owned: Vec<&TokenBalanceInfo> = tx
+        .post_token_balances
+        .iter()
+        .filter(|b| b.owner == pool)
+        .collect();
+    let source: Vec<&TokenBalanceInfo> = if owned.is_empty() {
+        tx.post_token_balances.iter().collect()
+    } else {
+        owned
+    };
     let base = vault(tx, &source, base_reserve)?;
-    let rest: Vec<&TokenBalanceInfo> = source.into_iter().filter(|b| tx.account_keys.get(b.account_index).map(String::as_str) != Some(base.address.as_str())).collect();
+    let rest: Vec<&TokenBalanceInfo> = source
+        .into_iter()
+        .filter(|b| {
+            tx.account_keys.get(b.account_index).map(String::as_str) != Some(base.address.as_str())
+        })
+        .collect();
     let quote = vault(tx, &rest, quote_reserve)?;
     Some((base, quote))
 }
 
-fn vault(tx: &ParsedTargetTransaction, balances: &[&TokenBalanceInfo], amount: u64) -> Option<Vault> {
+fn vault(
+    tx: &ParsedTargetTransaction,
+    balances: &[&TokenBalanceInfo],
+    amount: u64,
+) -> Option<Vault> {
     let match_ = balances.iter().find(|b| b.amount == amount)?;
     let address = tx.account_keys.get(match_.account_index)?.clone();
     Some(Vault {
         mint: match_.mint.clone(),
         address,
-        program_id: if match_.program_id.is_empty() { TOKEN_PROGRAM.to_string() } else { match_.program_id.clone() },
+        program_id: if match_.program_id.is_empty() {
+            TOKEN_PROGRAM.to_string()
+        } else {
+            match_.program_id.clone()
+        },
     })
 }
 
 fn token_program_for(tx: &ParsedTargetTransaction, mint: &str) -> Option<String> {
-    tx.post_token_balances.iter().find(|b| b.mint == mint).map(|b| b.program_id.clone()).filter(|p| !p.is_empty())
+    tx.post_token_balances
+        .iter()
+        .find(|b| b.mint == mint)
+        .map(|b| b.program_id.clone())
+        .filter(|p| !p.is_empty())
 }
 
-fn base_event(tx: &ParsedTargetTransaction, event_index: u32, descriptor: &PoolDescriptor, trader: &str, is_buy: bool, sol: u64, token: u64, price: f64, curve_progress: Option<f64>, timestamp: i64) -> PoolTradeEvent {
+fn base_event(
+    tx: &ParsedTargetTransaction,
+    event_index: u32,
+    descriptor: &PoolDescriptor,
+    trader: &str,
+    is_buy: bool,
+    sol: u64,
+    token: u64,
+    price: f64,
+    curve_progress: Option<f64>,
+    timestamp: i64,
+) -> PoolTradeEvent {
     PoolTradeEvent {
         signature: tx.signature.clone(),
         slot: tx.slot,
@@ -313,10 +399,21 @@ fn base_event(tx: &ParsedTargetTransaction, event_index: u32, descriptor: &PoolD
 }
 
 fn ratio(quote: u64, base: u64) -> f64 {
-    if base == 0 { 0.0 } else { quote as f64 / base as f64 }
+    if base == 0 {
+        0.0
+    } else {
+        quote as f64 / base as f64
+    }
 }
 
-fn buyback_recipient(tx: &ParsedTargetTransaction, pool: &str, trader: &str, vaults: &(Vault, Vault), coin_creator: &Pubkey, protocol_fee_recipient: &Pubkey) -> Option<String> {
+fn buyback_recipient(
+    tx: &ParsedTargetTransaction,
+    pool: &str,
+    trader: &str,
+    vaults: &(Vault, Vault),
+    coin_creator: &Pubkey,
+    protocol_fee_recipient: &Pubkey,
+) -> Option<String> {
     let quote_program: Pubkey = vaults.1.program_id.parse().ok()?;
     let base_program: Pubkey = vaults.0.program_id.parse().ok()?;
     let trader_key: Pubkey = trader.parse().ok()?;
@@ -358,13 +455,22 @@ fn buyback_recipient(tx: &ParsedTargetTransaction, pool: &str, trader: &str, vau
         if ix.data.len() < 8 || !SWAP_DISCS.iter().any(|disc| ix.data.starts_with(disc)) {
             continue;
         }
-        if tx.account_keys.get(ix.program_id_index).map(String::as_str) != Some(PUMP_AMM_PROGRAM.to_string().as_str()) {
+        if tx.account_keys.get(ix.program_id_index).map(String::as_str)
+            != Some(PUMP_AMM_PROGRAM.to_string().as_str())
+        {
             continue;
         }
-        let keys: Vec<&str> = ix.accounts.iter().filter_map(|index| tx.account_keys.get(*index).map(String::as_str)).filter(|key| !known.contains(*key)).collect();
+        let keys: Vec<&str> = ix
+            .accounts
+            .iter()
+            .filter_map(|index| tx.account_keys.get(*index).map(String::as_str))
+            .filter(|key| !known.contains(*key))
+            .collect();
         for index in 0..keys.len().saturating_sub(1) {
             let recipient = keys[index];
-            let Ok(recipient_key) = recipient.parse::<Pubkey>() else { continue };
+            let Ok(recipient_key) = recipient.parse::<Pubkey>() else {
+                continue;
+            };
             let ata = ata(&recipient_key, &quote_mint, &quote_program).to_string();
             if keys.get(index + 1).copied() == Some(ata.as_str()) {
                 return Some(recipient.to_string());
@@ -374,10 +480,20 @@ fn buyback_recipient(tx: &ParsedTargetTransaction, pool: &str, trader: &str, vau
     None
 }
 
-pub fn fill_from_logs(logs: &[String], owner: &Pubkey, mint: &str, venue: &str) -> Option<(u64, u64)> {
+pub fn fill_from_logs(
+    logs: &[String],
+    owner: &Pubkey,
+    mint: &str,
+    venue: &str,
+) -> Option<(u64, u64)> {
     for log in logs {
-        let Some(encoded) = log.strip_prefix("Program data: ") else { continue };
-        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) else { continue };
+        let Some(encoded) = log.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        else {
+            continue;
+        };
         if bytes.len() < 8 {
             continue;
         }
@@ -409,10 +525,15 @@ pub fn fill_from_logs(logs: &[String], owner: &Pubkey, mint: &str, venue: &str) 
             let _pool = c.pubkey()?;
             let user = c.pubkey()?;
             let user_base_ata = c.pubkey()?;
-            let Ok(mint_key) = mint.parse::<Pubkey>() else { continue };
+            let Ok(mint_key) = mint.parse::<Pubkey>() else {
+                continue;
+            };
             let ata_legacy = ata(owner, &mint_key, &TOKEN_PROGRAM);
             let ata_2022 = ata(owner, &mint_key, &TOKEN_2022_PROGRAM);
-            if user == *owner && base > 0 && (user_base_ata == ata_legacy || user_base_ata == ata_2022) {
+            if user == *owner
+                && base > 0
+                && (user_base_ata == ata_legacy || user_base_ata == ata_2022)
+            {
                 return Some((base, quote));
             }
         }
@@ -421,5 +542,8 @@ pub fn fill_from_logs(logs: &[String], owner: &Pubkey, mint: &str, venue: &str) 
 }
 
 pub fn program_ids(account_keys: &[String], instructions: &[CompiledIx]) -> Vec<String> {
-    instructions.iter().filter_map(|ix| account_keys.get(ix.program_id_index).cloned()).collect()
+    instructions
+        .iter()
+        .filter_map(|ix| account_keys.get(ix.program_id_index).cloned())
+        .collect()
 }

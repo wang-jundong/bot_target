@@ -1,13 +1,13 @@
 use crate::events::mono_ms;
-use crate::helius::{is_non_retryable_buy_error, HeliusSender, HeliusSenderUnavailable};
-use crate::journal::{create_pnl_record, ClosedTradePnlInput, PnlJournal, RecoveryJournal};
-use crate::state::{is_holding, Lifecycle, TokenInner};
+use crate::helius::{HeliusSender, HeliusSenderUnavailable, is_non_retryable_buy_error};
+use crate::journal::{ClosedTradePnlInput, PnlJournal, RecoveryJournal, create_pnl_record};
+use crate::state::{Lifecycle, TokenInner, is_holding};
+use crate::venues::Venues;
 use crate::venues::decoder::fill_from_logs;
 use crate::venues::trade::compile_trade;
-use crate::venues::Venues;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcSendTransactionConfig, RpcTransactionConfig};
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -16,8 +16,8 @@ use solana_sdk::signature::{Keypair, Signature};
 use solana_sdk::signer::Signer;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_transaction_status_client_types::{
-    option_serializer::OptionSerializer, EncodedConfirmedTransactionWithStatusMeta, TransactionConfirmationStatus,
-    UiTransactionEncoding, UiTransactionTokenBalance,
+    EncodedConfirmedTransactionWithStatusMeta, TransactionConfirmationStatus,
+    UiTransactionEncoding, UiTransactionTokenBalance, option_serializer::OptionSerializer,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -32,7 +32,11 @@ pub struct BlockhashCache {
 
 impl BlockhashCache {
     pub fn new(client: Arc<RpcClient>, refresh_ms: u64) -> Self {
-        Self { client, refresh_ms, current: Mutex::new(None) }
+        Self {
+            client,
+            refresh_ms,
+            current: Mutex::new(None),
+        }
     }
 
     pub async fn refresh(&self) -> Result<()> {
@@ -62,7 +66,11 @@ impl BlockhashCache {
             }
         }
         self.refresh().await?;
-        self.current.lock().await.ok_or_else(|| anyhow!("blockhash unavailable")).map(|(hash, _)| hash)
+        self.current
+            .lock()
+            .await
+            .ok_or_else(|| anyhow!("blockhash unavailable"))
+            .map(|(hash, _)| hash)
     }
 }
 
@@ -109,17 +117,34 @@ impl LiveExecution {
                 }
                 let slippage = state.buy_slippage_bps.unwrap_or(self.buy_slippage_bps);
                 let lamports = state.buy_lamports.unwrap_or(self.buy_lamports);
-                let token_program_owned = state.descriptor.token_program.clone().unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string());
+                let token_program_owned = state
+                    .descriptor
+                    .token_program
+                    .clone()
+                    .unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string());
                 let token_program = token_program_owned.parse()?;
                 let venue = state.descriptor.venue.clone();
                 let mint = state.descriptor.mint.clone();
                 if attempt > 1 || state.prepared_buy.is_none() {
-                    state.prepared_buy = Some(self.venues.build_buy(&venue, &self.wallet.pubkey(), &mint, &token_program, lamports, slippage)?);
+                    state.prepared_buy = Some(self.venues.build_buy(
+                        &venue,
+                        &self.wallet.pubkey(),
+                        &mint,
+                        &token_program,
+                        lamports,
+                        slippage,
+                    )?);
                 }
                 state.prepared_buy.clone()
             };
-            let Some(prepared) = prepared else { last_error = "buy was not prepared".to_string(); continue };
-            match self.submit_and_confirm(token, &prepared, true, attempt, None).await {
+            let Some(prepared) = prepared else {
+                last_error = "buy was not prepared".to_string();
+                continue;
+            };
+            match self
+                .submit_and_confirm(token, &prepared, true, attempt, None)
+                .await
+            {
                 Ok((_signature, token_amount, sol_amount, price)) => {
                     let (buy_processed, buy_confirmed) = {
                         let mut state = token.lock().await;
@@ -134,7 +159,14 @@ impl LiveExecution {
                         state.transition(Lifecycle::PositionActiveConfirmed)?;
                         let buy_confirmed = self.record_value(&state, "buy_confirmed", json!({}));
                         let strategy_price = crate::events::to_strategy_price(price);
-                        let missed = state.engine.on_buy_fill(if strategy_price > 0.0 { strategy_price } else { 0.0 }, now_ms());
+                        let missed = state.engine.on_buy_fill(
+                            if strategy_price > 0.0 {
+                                strategy_price
+                            } else {
+                                0.0
+                            },
+                            now_ms(),
+                        );
                         if missed.is_some() {
                             state.sell_after_fill = true;
                         } else if state.sell_after_fill {
@@ -159,7 +191,8 @@ impl LiveExecution {
                     tracing::warn!(attempt, mint = %mint, error = %last_error, "[05 ENTRY] Buy attempt failed");
                     if is_non_retryable_buy_error(&last_error, &venue) {
                         let mut state = token.lock().await;
-                        self.reject_buy(&mut state, "buy_slippage_rejected", &last_error).await;
+                        self.reject_buy(&mut state, "buy_slippage_rejected", &last_error)
+                            .await;
                         return Ok(());
                     }
                     // Drop stale prepared tx so next attempt rebuilds from latest geyser reserves.
@@ -172,11 +205,16 @@ impl LiveExecution {
         Ok(())
     }
 
-    pub async fn send_sell(self: &Arc<Self>, token: &Mutex<TokenInner>, reason: &str) -> Result<()> {
+    pub async fn send_sell(
+        self: &Arc<Self>,
+        token: &Mutex<TokenInner>,
+        reason: &str,
+    ) -> Result<()> {
         let amount = token.lock().await.actual_token_amount;
         let Some(amount) = amount else {
             let mut state = token.lock().await;
-            self.sell_failed(&mut state, reason, "position token amount is unknown").await;
+            self.sell_failed(&mut state, reason, "position token amount is unknown")
+                .await;
             return Ok(());
         };
         let mut last_error = String::from("sell failed");
@@ -200,7 +238,14 @@ impl LiveExecution {
                 };
                 let venue = state.descriptor.venue.clone();
                 let mint = state.descriptor.mint.clone();
-                match self.venues.build_sell(&venue, &self.wallet.pubkey(), &mint, &token_program, amount, slippage) {
+                match self.venues.build_sell(
+                    &venue,
+                    &self.wallet.pubkey(),
+                    &mint,
+                    &token_program,
+                    amount,
+                    slippage,
+                ) {
                     Ok(built) => state.prepared_sell = Some(built),
                     Err(err) => {
                         last_error = err.to_string();
@@ -217,7 +262,10 @@ impl LiveExecution {
                 state.prepared_sell.clone()
             };
             let Some(prepared) = prepared else { continue };
-            match self.submit_and_confirm(token, &prepared, false, attempt, Some(reason)).await {
+            match self
+                .submit_and_confirm(token, &prepared, false, attempt, Some(reason))
+                .await
+            {
                 Ok((_signature, token_amount, sol_amount, price)) => {
                     let (closed, pnl, mint) = {
                         let mut state = token.lock().await;
@@ -227,9 +275,17 @@ impl LiveExecution {
                         if state.lifecycle == Lifecycle::SellPrepared {
                             state.transition(Lifecycle::SellSent)?;
                         }
-                        let closed = self.record_value(&state, "position_closed", json!({ "reason": reason }));
+                        let closed = self.record_value(
+                            &state,
+                            "position_closed",
+                            json!({ "reason": reason }),
+                        );
                         let closed_at = now_ms();
-                        let pnl = if let (Some(entry_sol), Some(entry_price), Some(entry_ms)) = (state.actual_entry_sol_amount, state.prices.actual_entry_fill_price, state.entry_processed_ms) {
+                        let pnl = if let (Some(entry_sol), Some(entry_price), Some(entry_ms)) = (
+                            state.actual_entry_sol_amount,
+                            state.prices.actual_entry_fill_price,
+                            state.entry_processed_ms,
+                        ) {
                             Some(ClosedTradePnlInput {
                                 closed_at_ms: closed_at,
                                 descriptor: state.descriptor.clone(),
@@ -264,8 +320,12 @@ impl LiveExecution {
                         journal.record_critical(closed).await;
                         if let Some(input) = pnl {
                             match pnl_journal.record(input).await {
-                                Ok(()) => tracing::info!(mint = %mint, "[PNL] Closed trade appended"),
-                                Err(err) => tracing::error!(error = %err, mint = %mint, "[PNL] Failed to append closed trade"),
+                                Ok(()) => {
+                                    tracing::info!(mint = %mint, "[PNL] Closed trade appended")
+                                }
+                                Err(err) => {
+                                    tracing::error!(error = %err, mint = %mint, "[PNL] Failed to append closed trade")
+                                }
                             }
                             let _ = create_pnl_record;
                         }
@@ -306,19 +366,32 @@ impl LiveExecution {
             let (event, extra) = if is_buy {
                 state.buy_signature = Some(signature.clone());
                 state.transition(Lifecycle::BuySent)?;
-                ("buy_sent", json!({ "attempt": attempt, "signature": signature, "fallback": fallback }))
+                (
+                    "buy_sent",
+                    json!({ "attempt": attempt, "signature": signature, "fallback": fallback }),
+                )
             } else {
                 state.sell_signature = Some(signature.clone());
-                ("sell_sent", json!({ "attempt": attempt, "reason": sell_reason.unwrap_or(""), "signature": signature, "fallback": fallback }))
+                (
+                    "sell_sent",
+                    json!({ "attempt": attempt, "reason": sell_reason.unwrap_or(""), "signature": signature, "fallback": fallback }),
+                )
             };
             let value = self.record_value(&state, event, extra);
-            (state.descriptor.mint.clone(), state.descriptor.venue.clone(), value)
+            (
+                state.descriptor.mint.clone(),
+                state.descriptor.venue.clone(),
+                value,
+            )
         };
         tracing::info!(value = %sent_record, "{}", record_message(if is_buy { "buy_sent" } else { "sell_sent" }));
         // Disk flush used to hold the token lock and run before confirmation polling.
         let journal = Arc::clone(&self.journal);
         let flush = async move { journal.record_critical(sent_record).await };
-        let ((), confirmed) = tokio::join!(flush, self.confirm(token, &signature, &mint, &venue, fallback));
+        let ((), confirmed) = tokio::join!(
+            flush,
+            self.confirm(token, &signature, &mint, &venue, fallback)
+        );
         let (token_amount, sol_amount, price) = confirmed?;
         if is_buy && token_amount == 0 {
             return Err(anyhow!("buy fill could not be determined"));
@@ -329,7 +402,11 @@ impl LiveExecution {
         Ok((signature, token_amount, sol_amount, price))
     }
 
-    async fn submit(&self, encoded: &str, transaction: &VersionedTransaction) -> Result<(String, bool)> {
+    async fn submit(
+        &self,
+        encoded: &str,
+        transaction: &VersionedTransaction,
+    ) -> Result<(String, bool)> {
         let mut last_error = anyhow!("sender failed");
         for attempt in 1..=3 {
             match self.sender.send(encoded, mono_ms()).await {
@@ -357,34 +434,64 @@ impl LiveExecution {
             .await
         {
             Ok(signature) => Ok((signature.to_string(), true)),
-            Err(err) => Err(anyhow!("Sender and RPC fallback both failed: {last_error}; {err}")),
+            Err(err) => Err(anyhow!(
+                "Sender and RPC fallback both failed: {last_error}; {err}"
+            )),
         }
     }
 
-    async fn confirm(&self, token: &Mutex<TokenInner>, signature: &str, mint: &str, venue: &str, fallback: bool) -> Result<(u64, u64, f64)> {
+    async fn confirm(
+        &self,
+        token: &Mutex<TokenInner>,
+        signature: &str,
+        mint: &str,
+        venue: &str,
+        fallback: bool,
+    ) -> Result<(u64, u64, f64)> {
         // If status was seen but fill lagged, re-poll up to 3 outer rounds.
         let mut last_err = anyhow!("confirmation timed out for {signature}");
         for poll in 1..=3 {
-            match self.wait_processed(token, signature, mint, venue, fallback).await {
+            match self
+                .wait_processed(token, signature, mint, venue, fallback)
+                .await
+            {
                 Ok(fill) => return Ok(fill),
                 Err(err) => {
-                    let seen = err.downcast_ref::<ConfirmationTimeoutError>().map(|e| e.seen).unwrap_or(false);
+                    let seen = err
+                        .downcast_ref::<ConfirmationTimeoutError>()
+                        .map(|e| e.seen)
+                        .unwrap_or(false);
                     last_err = err;
                     if !seen || poll == 3 {
                         break;
                     }
-                    tracing::warn!(poll, signature, "[06 CONFIRM] Seen but fill missing; re-polling");
+                    tracing::warn!(
+                        poll,
+                        signature,
+                        "[06 CONFIRM] Seen but fill missing; re-polling"
+                    );
                 }
             }
         }
         Err(last_err)
     }
 
-    async fn wait_processed(&self, token: &Mutex<TokenInner>, signature: &str, mint: &str, venue: &str, fallback: bool) -> Result<(u64, u64, f64)> {
+    async fn wait_processed(
+        &self,
+        token: &Mutex<TokenInner>,
+        signature: &str,
+        mint: &str,
+        venue: &str,
+        fallback: bool,
+    ) -> Result<(u64, u64, f64)> {
         let signature_parsed = Signature::from_str(signature)?;
         let started = Instant::now();
         let deadline = Duration::from_secs(30);
-        let unseen_deadline = if fallback { Duration::from_secs(10) } else { deadline };
+        let unseen_deadline = if fallback {
+            Duration::from_secs(10)
+        } else {
+            deadline
+        };
         let notify = token.lock().await.own_fill_notify.clone();
         let mut seen = false;
         while started.elapsed() < deadline {
@@ -410,7 +517,10 @@ impl LiveExecution {
                 }
                 if matches!(
                     status.confirmation_status,
-                    Some(TransactionConfirmationStatus::Confirmed | TransactionConfirmationStatus::Finalized)
+                    Some(
+                        TransactionConfirmationStatus::Confirmed
+                            | TransactionConfirmationStatus::Finalized
+                    )
                 ) {
                     let fetch = self.rpc.get_transaction_with_config(
                         &signature_parsed,
@@ -431,7 +541,9 @@ impl LiveExecution {
                         result = &mut fetch => result,
                     } {
                         Ok(tx) => {
-                            if let Some(fill) = parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue) {
+                            if let Some(fill) =
+                                parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue)
+                            {
                                 return Ok(fill);
                             }
                             // Confirmed but fill not parseable yet — keep polling.
@@ -449,21 +561,39 @@ impl LiveExecution {
                 _ = tokio::time::sleep(confirm_backoff(started.elapsed())) => {}
             }
         }
-        Err(ConfirmationTimeoutError { signature: signature.to_string(), seen }.into())
+        Err(ConfirmationTimeoutError {
+            signature: signature.to_string(),
+            seen,
+        }
+        .into())
     }
 
     /// Recover fill from a landed signature (bot_target getTransaction + parseFill).
-    pub async fn fill_from_signature(&self, signature: &str, mint: &str, venue: &str) -> Result<Option<(u64, u64, f64)>> {
+    pub async fn fill_from_signature(
+        &self,
+        signature: &str,
+        mint: &str,
+        venue: &str,
+    ) -> Result<Option<(u64, u64, f64)>> {
         let signature_parsed = Signature::from_str(signature)?;
-        let tx = self.rpc.get_transaction_with_config(
-            &signature_parsed,
-            RpcTransactionConfig {
-                encoding: Some(UiTransactionEncoding::Json),
-                commitment: Some(CommitmentConfig::confirmed()),
-                max_supported_transaction_version: Some(0),
-            },
-        ).await?;
-        if tx.transaction.meta.as_ref().and_then(|m| m.err.as_ref()).is_some() {
+        let tx = self
+            .rpc
+            .get_transaction_with_config(
+                &signature_parsed,
+                RpcTransactionConfig {
+                    encoding: Some(UiTransactionEncoding::Json),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    max_supported_transaction_version: Some(0),
+                },
+            )
+            .await?;
+        if tx
+            .transaction
+            .meta
+            .as_ref()
+            .and_then(|m| m.err.as_ref())
+            .is_some()
+        {
             return Ok(None);
         }
         Ok(parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue))
@@ -529,7 +659,6 @@ impl LiveExecution {
     }
 }
 
-
 #[derive(Debug, thiserror::Error)]
 #[error("confirmation timed out for {signature}")]
 struct ConfirmationTimeoutError {
@@ -559,12 +688,28 @@ fn record_message(event: &str) -> &'static str {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
-fn token_balance_sum(balances: &OptionSerializer<Vec<UiTransactionTokenBalance>>, owner: &str, mint: &str) -> u64 {
-    let OptionSerializer::Some(items) = balances else { return 0 };
-    items.iter().filter(|balance| balance.mint == mint && matches!(&balance.owner, OptionSerializer::Some(value) if value == owner)).filter_map(|balance| balance.ui_token_amount.amount.parse::<u64>().ok()).sum()
+fn token_balance_sum(
+    balances: &OptionSerializer<Vec<UiTransactionTokenBalance>>,
+    owner: &str,
+    mint: &str,
+) -> u64 {
+    let OptionSerializer::Some(items) = balances else {
+        return 0;
+    };
+    items
+        .iter()
+        .filter(|balance| {
+            balance.mint == mint
+                && matches!(&balance.owner, OptionSerializer::Some(value) if value == owner)
+        })
+        .filter_map(|balance| balance.ui_token_amount.amount.parse::<u64>().ok())
+        .sum()
 }
 
 pub fn parse_fill_from_tx(
@@ -582,7 +727,11 @@ pub fn parse_fill_from_tx(
         _ => &[],
     };
     if let Some((token_amount, sol_amount)) = fill_from_logs(logs, owner, mint, venue) {
-        let price = if token_amount == 0 { 0.0 } else { sol_amount as f64 / token_amount as f64 };
+        let price = if token_amount == 0 {
+            0.0
+        } else {
+            sol_amount as f64 / token_amount as f64
+        };
         return Some((token_amount, sol_amount, price));
     }
     let owner_s = owner.to_string();
@@ -593,15 +742,25 @@ pub fn parse_fill_from_tx(
         return None;
     }
     let sol_amount = sol_delta_for_owner(tx, owner);
-    let price = if token_amount == 0 { 0.0 } else { sol_amount as f64 / token_amount as f64 };
+    let price = if token_amount == 0 {
+        0.0
+    } else {
+        sol_amount as f64 / token_amount as f64
+    };
     Some((token_amount, sol_amount, price))
 }
 
 fn sol_delta_for_owner(tx: &EncodedConfirmedTransactionWithStatusMeta, owner: &Pubkey) -> u64 {
-    let Some(meta) = tx.transaction.meta.as_ref() else { return 0 };
-    let Some(decoded) = tx.transaction.transaction.decode() else { return 0 };
+    let Some(meta) = tx.transaction.meta.as_ref() else {
+        return 0;
+    };
+    let Some(decoded) = tx.transaction.transaction.decode() else {
+        return 0;
+    };
     let keys = decoded.message.static_account_keys();
-    let Some(index) = keys.iter().position(|key| key == owner) else { return 0 };
+    let Some(index) = keys.iter().position(|key| key == owner) else {
+        return 0;
+    };
     let pre = meta.pre_balances.get(index).copied().unwrap_or(0);
     let post = meta.post_balances.get(index).copied().unwrap_or(0);
     pre.abs_diff(post)

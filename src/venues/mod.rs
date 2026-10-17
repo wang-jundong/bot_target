@@ -30,11 +30,17 @@ impl Venues {
     }
 
     pub fn note_curve(&self, mint: &str, curve: PumpCurveSnapshot) {
-        self.curves.write().expect("curve map").insert(mint.to_string(), curve);
+        self.curves
+            .write()
+            .expect("curve map")
+            .insert(mint.to_string(), curve);
     }
 
     pub fn note_swap(&self, mint: &str, swap: PumpSwapSnapshot) {
-        self.pools.write().expect("pool map").insert(mint.to_string(), swap);
+        self.pools
+            .write()
+            .expect("pool map")
+            .insert(mint.to_string(), swap);
     }
 
     pub fn get_swap(&self, mint: &str) -> Option<PumpSwapSnapshot> {
@@ -47,7 +53,9 @@ impl Venues {
 
     pub fn update_amm_vault(&self, mint: &str, is_base: bool, amount: u64) {
         let mut pools = self.pools.write().expect("pool map");
-        let Some(swap) = pools.get_mut(mint) else { return };
+        let Some(swap) = pools.get_mut(mint) else {
+            return;
+        };
         if is_base {
             swap.base_reserve = amount as u128;
         } else {
@@ -55,25 +63,85 @@ impl Venues {
         }
     }
 
-    pub fn build_buy(&self, venue: &str, owner: &Pubkey, mint: &str, token_program: &Pubkey, lamports: u64, slippage_bps: u64) -> Result<PreparedTrade> {
+    pub fn build_buy(
+        &self,
+        venue: &str,
+        owner: &Pubkey,
+        mint: &str,
+        token_program: &Pubkey,
+        lamports: u64,
+        slippage_bps: u64,
+    ) -> Result<PreparedTrade> {
         if venue == "pumpswap" {
             let pools = self.pools.read().expect("pool map");
-            let swap = pools.get(mint).ok_or_else(|| anyhow::anyhow!("no streamed pumpswap pool for {mint}"))?;
-            return trade::build_amm_buy(owner, lamports, slippage_bps, swap, self.compute_unit_limit, self.priority_fee_lamports, self.tip_lamports);
+            let swap = pools
+                .get(mint)
+                .ok_or_else(|| anyhow::anyhow!("no streamed pumpswap pool for {mint}"))?;
+            return trade::build_amm_buy(
+                owner,
+                lamports,
+                slippage_bps,
+                swap,
+                self.compute_unit_limit,
+                self.priority_fee_lamports,
+                self.tip_lamports,
+            );
         }
         let curves = self.curves.read().expect("curve map");
-        let curve = curves.get(mint).ok_or_else(|| anyhow::anyhow!("no streamed curve for {mint}"))?;
-        trade::build_pump_buy(owner, &mint.parse()?, token_program, lamports, slippage_bps, curve, self.compute_unit_limit, self.priority_fee_lamports, self.tip_lamports)
+        let curve = curves
+            .get(mint)
+            .ok_or_else(|| anyhow::anyhow!("no streamed curve for {mint}"))?;
+        trade::build_pump_buy(
+            owner,
+            &mint.parse()?,
+            token_program,
+            lamports,
+            slippage_bps,
+            curve,
+            self.compute_unit_limit,
+            self.priority_fee_lamports,
+            self.tip_lamports,
+        )
     }
 
-    pub fn build_sell(&self, venue: &str, owner: &Pubkey, mint: &str, token_program: &Pubkey, token_amount: u64, slippage_bps: u64) -> Result<PreparedTrade> {
+    pub fn build_sell(
+        &self,
+        venue: &str,
+        owner: &Pubkey,
+        mint: &str,
+        token_program: &Pubkey,
+        token_amount: u64,
+        slippage_bps: u64,
+    ) -> Result<PreparedTrade> {
         if venue == "pumpswap" {
             let pools = self.pools.read().expect("pool map");
-            let swap = pools.get(mint).ok_or_else(|| anyhow::anyhow!("no streamed pumpswap pool for {mint}"))?;
-            return trade::build_amm_sell(owner, token_amount, slippage_bps, swap, self.compute_unit_limit, self.priority_fee_lamports, self.tip_lamports);
+            let swap = pools
+                .get(mint)
+                .ok_or_else(|| anyhow::anyhow!("no streamed pumpswap pool for {mint}"))?;
+            return trade::build_amm_sell(
+                owner,
+                token_amount,
+                slippage_bps,
+                swap,
+                self.compute_unit_limit,
+                self.priority_fee_lamports,
+                self.tip_lamports,
+            );
         }
         let curves = self.curves.read().expect("curve map");
-        let curve = curves.get(mint).ok_or_else(|| anyhow::anyhow!("no streamed curve for {mint}"))?;
-        trade::build_pump_sell(owner, &mint.parse()?, token_program, token_amount, slippage_bps, curve, self.compute_unit_limit, self.priority_fee_lamports, self.tip_lamports)
+        let curve = curves
+            .get(mint)
+            .ok_or_else(|| anyhow::anyhow!("no streamed curve for {mint}"))?;
+        trade::build_pump_sell(
+            owner,
+            &mint.parse()?,
+            token_program,
+            token_amount,
+            slippage_bps,
+            curve,
+            self.compute_unit_limit,
+            self.priority_fee_lamports,
+            self.tip_lamports,
+        )
     }
 }
