@@ -239,16 +239,17 @@ pub struct StrategyV071Config {
 }
 
 impl StrategyV071Config {
-    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-17).
-    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
-    /// `max_hold_s` disable those bounds. `size_sol` is the live position size.
+    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-17 update).
+    /// `min_mc_sol` is 0, so only the 60 SOL cap applies. Zero `min_entry_s`,
+    /// `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and `max_hold_s` disable those
+    /// bounds. `size_sol` is the live position size.
     pub fn default_v071() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
             dust_sol: 0.8,
             min_entry_s: 1.5,
             max_entry_s: 45.0,
-            min_mc_sol: 25.0,
+            min_mc_sol: 0.0,
             max_mc_sol: 60.0,
             sell_hit_count: 5,
             sell_hit_min: 8.0,

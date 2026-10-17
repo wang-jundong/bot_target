@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(loaded.dust_sol, 0.8);
         assert_eq!(loaded.min_entry_s, 1.5);
         assert_eq!(loaded.max_entry_s, 45.0);
-        assert_eq!(loaded.min_mc_sol, 25.0);
+        assert_eq!(loaded.min_mc_sol, 0.0);
         assert_eq!(loaded.max_mc_sol, 60.0);
         assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 8.0);
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn buys_first_print_inside_clock_and_mcap_band() {
+    fn buys_first_print_inside_clock_under_mcap_cap() {
         let mut engine = bound(|_| {}, "");
         assert_eq!(engine.phase_name(), "seek_sell");
         assert!(engine.needs_pool_tape());
@@ -673,25 +673,30 @@ mod tests {
         );
         assert_eq!(engine.phase_name(), "seek_sell");
 
-        let mut cheap = print("BUY", 1.0, "cheap", T0 + 2_000);
-        cheap.price = 24e-9;
-        assert_eq!(engine.on_event(&cheap), None);
-        assert_eq!(engine.phase_name(), "seek_sell");
-
-        let mut rich = print("BUY", 1.0, "rich", T0 + 3_000);
+        let mut rich = print("BUY", 1.0, "rich", T0 + 2_000);
         rich.price = 61e-9;
         assert_eq!(engine.on_event(&rich), None);
+        assert_eq!(engine.phase_name(), "seek_sell");
 
-        assert_eq!(
-            engine.on_event(&print("SELL", 0.05, "in", T0 + 4_000)),
-            Some("BUY")
-        );
+        let mut cheap = print("BUY", 1.0, "cheap", T0 + 3_000);
+        cheap.price = 24e-9;
+        assert_eq!(engine.on_event(&cheap), Some("BUY"));
         assert_eq!(engine.phase_name(), "pending");
         assert_eq!(engine.last_buy_reason(), "clock");
-        assert_eq!(engine.last_buy_diag().wall_s, 4.0);
-        assert_eq!(engine.last_buy_diag().mcap, 50.0);
-        assert_eq!(engine.last_buy_diag().end_ret, 0.0);
+        assert_eq!(engine.last_buy_diag().wall_s, 3.0);
+        assert_eq!(engine.last_buy_diag().mcap, 24.0);
+        assert_eq!(engine.last_buy_diag().end_ret, -0.52);
         assert_eq!(engine.last_buy_diag().buy_hit_sol, 0.0);
+
+        let mut floored = bound(|cfg| cfg.min_mc_sol = 25.0, "");
+        let mut under = print("BUY", 1.0, "under-floor", T0 + 2_000);
+        under.price = 24e-9;
+        assert_eq!(floored.on_event(&under), None);
+        assert_eq!(
+            floored.on_event(&print("SELL", 0.05, "in", T0 + 4_000)),
+            Some("BUY")
+        );
+        assert_eq!(floored.last_buy_diag().mcap, 50.0);
     }
 
     #[test]
