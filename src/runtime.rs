@@ -248,6 +248,14 @@ impl TradingRuntime {
         let token = if let Some(token) = existing {
             token
         } else if event.trader == slot.target_wallet && event.side == Side::Buy {
+            if !sol_pair(descriptor, event) {
+                tracing::info!(
+                    mint = %descriptor.mint,
+                    quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
+                    "[03 DETECT] Skipping non-SOL pair"
+                );
+                return Ok(false);
+            }
             let engine = self.make_engine(slot);
             let token = Arc::new(Mutex::new(TokenInner::new(
                 descriptor.clone(),
@@ -651,6 +659,14 @@ impl TradingRuntime {
             tracing::warn!(mint = %state.descriptor.mint, "[05 ENTRY] Buy blocked: mint denylist");
             return false;
         }
+        if !crate::venues::ids::is_sol_quote(state.descriptor.quote_mint.as_deref()) {
+            tracing::info!(
+                mint = %state.descriptor.mint,
+                quote_mint = state.descriptor.quote_mint.as_deref().unwrap_or(""),
+                "[05 ENTRY] Buy skipped: non-SOL pair"
+            );
+            return false;
+        }
         true
     }
 
@@ -816,6 +832,14 @@ impl TradingRuntime {
                 continue;
             };
             if matches!(record.lifecycle.as_deref(), Some("CLOSED" | "FAILED")) {
+                continue;
+            }
+            if !crate::venues::ids::is_sol_quote(descriptor.quote_mint.as_deref()) {
+                tracing::info!(
+                    mint = %descriptor.mint,
+                    quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
+                    "[07 POSITION] Skipping recovery of non-SOL pair"
+                );
                 continue;
             }
             let buy_sig = record
@@ -997,6 +1021,20 @@ impl TradingRuntime {
                 .await;
         }
     }
+}
+
+fn sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) -> bool {
+    let quote = descriptor
+        .quote_mint
+        .as_deref()
+        .or_else(|| {
+            event
+                .curve
+                .as_ref()
+                .and_then(|curve| curve.quote_mint.as_deref())
+        })
+        .or_else(|| event.swap.as_ref().map(|swap| swap.quote_mint.as_str()));
+    crate::venues::ids::is_sol_quote(quote)
 }
 
 fn now_ms() -> u64 {

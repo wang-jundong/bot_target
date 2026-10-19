@@ -16,6 +16,17 @@ pub static ATA_PROGRAM: LazyLock<Pubkey> =
 pub static WSOL_MINT: LazyLock<Pubkey> =
     LazyLock::new(|| pubkey("So11111111111111111111111111111111111111112"));
 
+/// Bonding curves quote native SOL as the System Program id. PumpSwap quotes WSOL.
+/// A missing quote is a legacy SOL curve (the quote field was added later).
+pub fn is_sol_quote(quote_mint: Option<&str>) -> bool {
+    match quote_mint.map(str::trim).filter(|q| !q.is_empty()) {
+        None => true,
+        Some(quote) => {
+            quote == WSOL_MINT.to_string() || quote == solana_sdk::system_program::id().to_string()
+        }
+    }
+}
+
 pub static PUMP_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
     vec![
         "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM",
@@ -268,4 +279,21 @@ pub fn parse_amm_global_config(data: &[u8]) -> Option<AmmGlobalConfig> {
         protocol_fee_recipients,
         coin_creator_fee_bps,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_sol_quote;
+
+    #[test]
+    fn sol_quotes_are_native_sol_and_wsol() {
+        assert!(is_sol_quote(None));
+        assert!(is_sol_quote(Some("11111111111111111111111111111111")));
+        assert!(is_sol_quote(Some(
+            "So11111111111111111111111111111111111111112"
+        )));
+        assert!(!is_sol_quote(Some(
+            "PrekqLJvJ3qVdXmBGDiexvwUTF4rLFDa6HWS4HJbw9S"
+        )));
+    }
 }
