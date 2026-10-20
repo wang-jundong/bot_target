@@ -4,6 +4,8 @@
 
 # Embedded secrets (copy from bindings.example.rs)
 src/bindings.rs
+src/bindings.t1.rs
+src/bindings.t2.rs
 
 recovery/*.jsonl
 *.log
