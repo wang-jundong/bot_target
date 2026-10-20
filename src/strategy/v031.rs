@@ -1,6 +1,9 @@
 //! strategy_v_031 — sliding sell-hit inside a time gate.
 //!
-//! Faithful port of bot_target StrategyV031Engine. One instance per mint.
+//! Same flow as scalpingbot `strategy_v_031.py`. Market cap is the signal
+//! price times 1e9. A window below `min_mc_sol` or above `max_mc_sol`
+//! (0 disables that bound) slides and the search continues.
+//! One instance per mint.
 
 use crate::config::StrategyV031Config;
 use crate::strategy::common::{
@@ -459,6 +462,12 @@ impl StrategyV031Engine {
             } else {
                 0.0
             };
+            if (self.cfg.min_mc_sol > 0.0 && mcap < self.cfg.min_mc_sol)
+                || (self.cfg.max_mc_sol > 0.0 && mcap > self.cfg.max_mc_sol)
+            {
+                self.st.prints.remove(0);
+                return None;
+            }
             self.st.hit_sol = total;
             self.st.phase = PHASE_PENDING;
             self.st.why = "buy_hit".to_string();
@@ -601,6 +610,8 @@ mod tests {
         assert_eq!(loaded.max_entry_s, 16.0);
         assert_eq!(loaded.buy_hit_count, 4);
         assert_eq!(loaded.buy_hit_min, 1.0);
+        assert_eq!(loaded.min_mc_sol, 40.0);
+        assert_eq!(loaded.max_mc_sol, 0.0);
         assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 4.0);
         assert_eq!(loaded.take_profit, 0.4);
@@ -627,6 +638,47 @@ mod tests {
         assert_eq!(engine.last_buy_diag().wall_s, 5.0);
         assert_eq!(engine.last_buy_diag().end_ret, 0.0);
         assert_eq!(engine.last_buy_diag().mcap, 50.0);
+    }
+
+    #[test]
+    fn slides_window_outside_mcap_band() {
+        let mut low = bound(|_| {}, "");
+        for i in 0..4 {
+            let mut cheap = print("SELL", 0.3, &format!("cheap-{i}"), T0 + 5_000);
+            cheap.price = 39e-9;
+            assert_eq!(low.on_event(&cheap), None);
+        }
+        assert_eq!(low.phase_name(), "seek_sell");
+        let mut floor = print("SELL", 0.3, "floor", T0 + 6_000);
+        floor.price = 40e-9;
+        assert_eq!(low.on_event(&floor), Some("BUY"));
+        assert_eq!(low.last_buy_diag().mcap, 40.0);
+
+        let mut rich = bound(|_| {}, "");
+        for i in 0..4 {
+            let mut high = print("SELL", 0.3, &format!("rich-{i}"), T0 + 5_000);
+            high.price = 500e-9;
+            let signal = rich.on_event(&high);
+            if i < 3 {
+                assert_eq!(signal, None);
+            } else {
+                assert_eq!(signal, Some("BUY"));
+            }
+        }
+        assert_eq!(rich.last_buy_diag().mcap, 500.0);
+
+        let mut capped = bound(|cfg| cfg.max_mc_sol = 100.0, "");
+        for i in 0..4 {
+            let mut high = print("SELL", 0.3, &format!("cap-{i}"), T0 + 5_000);
+            high.price = 101e-9;
+            assert_eq!(capped.on_event(&high), None);
+        }
+        assert_eq!(capped.phase_name(), "seek_sell");
+        assert_eq!(
+            capped.on_event(&print("SELL", 0.3, "under-cap", T0 + 6_000)),
+            Some("BUY")
+        );
+        assert_eq!(capped.last_buy_diag().mcap, 50.0);
     }
 
     #[test]

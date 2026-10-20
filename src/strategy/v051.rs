@@ -1,9 +1,9 @@
 //! strategy_v_051 — sliding sell-hit inside a time clock.
 //!
 //! Same flow as strategy_v_031, for HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB.
-//! Knobs from scalpingbot `config/strategy_v_051.json` (2026-10-16).
-//! A `min_entry_s`, `max_entry_s`, or `max_hold_s` of 0 disables that cap.
-//! One instance per mint.
+//! Knobs from scalpingbot `config/strategy_v_051.json` (2026-10-21).
+//! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, or `max_hold_s`
+//! of 0 disables that bound. One instance per mint.
 
 use crate::config::StrategyV051Config;
 use crate::strategy::common::{
@@ -462,6 +462,12 @@ impl StrategyV051Engine {
             } else {
                 0.0
             };
+            if (self.cfg.min_mc_sol > 0.0 && mcap < self.cfg.min_mc_sol)
+                || (self.cfg.max_mc_sol > 0.0 && mcap > self.cfg.max_mc_sol)
+            {
+                self.st.prints.remove(0);
+                return None;
+            }
             self.st.hit_sol = total;
             self.st.phase = PHASE_PENDING;
             self.st.why = "buy_hit".to_string();
@@ -569,7 +575,7 @@ mod tests {
         sol: f64,
     ) -> Option<&'static str> {
         let mut last = None;
-        for i in 0..4 {
+        for i in 0..3 {
             last = engine.on_event(&print("SELL", sol, &format!("{tag}-{i}"), ts));
         }
         last
@@ -590,7 +596,7 @@ mod tests {
     }
 
     fn arm(engine: &mut StrategyV051Engine) {
-        assert_eq!(sells(engine, "arm", T0 + 5_000, 0.3), Some("BUY"));
+        assert_eq!(sells(engine, "arm", T0 + 5_000, 0.4), Some("BUY"));
     }
 
     #[test]
@@ -600,18 +606,20 @@ mod tests {
             loaded.gate_wallet,
             "HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB"
         );
-        assert_eq!(loaded.dust_sol, 0.1);
+        assert_eq!(loaded.dust_sol, 0.3);
         assert_eq!(loaded.min_entry_s, 0.0);
-        assert_eq!(loaded.max_entry_s, 0.0);
-        assert_eq!(loaded.buy_hit_count, 4);
+        assert_eq!(loaded.max_entry_s, 8.0);
+        assert_eq!(loaded.buy_hit_count, 3);
         assert_eq!(loaded.buy_hit_min, 1.0);
+        assert_eq!(loaded.min_mc_sol, 40.0);
+        assert_eq!(loaded.max_mc_sol, 100.0);
         assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 4.0);
-        assert_eq!(loaded.take_profit, 0.4);
-        assert_eq!(loaded.max_hold_s, 0.0);
-        assert!(!loaded.first_cycle_only);
+        assert_eq!(loaded.take_profit, 0.3);
+        assert_eq!(loaded.max_hold_s, 30.0);
+        assert!(loaded.first_cycle_only);
         assert!(loaded.target_sell_exit);
-        assert!(!loaded.repeat_entries);
+        assert!(loaded.repeat_entries);
         assert_eq!(loaded.size_sol, 1.0);
     }
 
@@ -620,7 +628,7 @@ mod tests {
         let mut engine = bound(|_| {}, "");
         assert_eq!(engine.phase_name(), "seek_sell");
         assert!(engine.needs_pool_tape());
-        assert_eq!(sells(&mut engine, "open", T0 + 1_000, 0.3), Some("BUY"));
+        assert_eq!(sells(&mut engine, "open", T0 + 1_000, 0.4), Some("BUY"));
         assert_eq!(engine.phase_name(), "pending");
         assert!(engine.last_buy_reason().contains("buy_hit"));
         assert_eq!(engine.last_buy_diag().buy_hit_sol, 1.2);
@@ -628,41 +636,72 @@ mod tests {
         assert_eq!(engine.last_buy_diag().end_ret, 0.0);
         assert_eq!(engine.last_buy_diag().mcap, 50.0);
 
-        let mut gated = bound(|cfg| cfg.min_entry_s = 4.0, "");
-        assert_eq!(sells(&mut gated, "early", T0 + 1_000, 0.3), None);
+        let mut immediate = bound(|_| {}, "");
+        assert_eq!(sells(&mut immediate, "now", T0 + 100, 0.4), Some("BUY"));
+        assert_eq!(immediate.last_buy_diag().wall_s, 0.1);
+
+        let mut gated = bound(|cfg| cfg.min_entry_s = 1.0, "");
+        assert_eq!(sells(&mut gated, "early", T0 + 500, 0.4), None);
         assert_eq!(gated.phase_name(), "seek_sell");
         assert_eq!(
-            gated.on_event(&print("SELL", 0.3, "later", T0 + 5_000)),
+            gated.on_event(&print("SELL", 0.4, "later", T0 + 1_000)),
             Some("BUY")
         );
-        assert_eq!(gated.last_buy_diag().wall_s, 5.0);
+        assert_eq!(gated.last_buy_diag().wall_s, 1.0);
+    }
+
+    #[test]
+    fn slides_window_outside_mcap_band() {
+        let mut low = bound(|_| {}, "");
+        for i in 0..3 {
+            let mut cheap = print("SELL", 0.4, &format!("cheap-{i}"), T0 + 2_000);
+            cheap.price = 39e-9;
+            assert_eq!(low.on_event(&cheap), None);
+        }
+        assert_eq!(low.phase_name(), "seek_sell");
+        let mut floor = print("SELL", 0.4, "floor", T0 + 3_000);
+        floor.price = 40e-9;
+        assert_eq!(low.on_event(&floor), Some("BUY"));
+        assert_eq!(low.last_buy_diag().mcap, 40.0);
+
+        let mut high = bound(|_| {}, "");
+        for i in 0..3 {
+            let mut rich = print("SELL", 0.4, &format!("rich-{i}"), T0 + 2_000);
+            rich.price = 101e-9;
+            assert_eq!(high.on_event(&rich), None);
+        }
+        assert_eq!(high.phase_name(), "seek_sell");
+        let mut cap = print("SELL", 0.4, "cap", T0 + 3_000);
+        cap.price = 100e-9;
+        assert_eq!(high.on_event(&cap), Some("BUY"));
+        assert_eq!(high.last_buy_diag().mcap, 100.0);
     }
 
     #[test]
     fn slides_short_sell_window_until_sum_qualifies() {
         let mut engine = bound(|_| {}, "");
-        assert_eq!(sells(&mut engine, "short", T0 + 5_000, 0.2), None);
+        assert_eq!(sells(&mut engine, "short", T0 + 5_000, 0.3125), None);
         assert_eq!(engine.phase_name(), "seek_sell");
         assert_eq!(
-            engine.on_event(&print("SELL", 0.4, "slide", T0 + 6_000)),
+            engine.on_event(&print("SELL", 0.375, "slide", T0 + 6_000)),
             Some("BUY")
         );
         assert_eq!(engine.last_buy_diag().buy_hit_sol, 1.0);
     }
 
     #[test]
-    fn open_clock_does_not_expire() {
+    fn ends_cycle_when_window_finishes_after_clock() {
         let mut engine = bound(|_| {}, "");
-        assert_eq!(sells(&mut engine, "late", T0 + 60_000, 0.3), Some("BUY"));
-        assert_eq!(engine.phase_name(), "pending");
+        assert_eq!(sells(&mut engine, "late", T0 + 8_001, 0.4), None);
+        assert_eq!(engine.phase_name(), "wait");
+        assert!(!engine.needs_pool_tape());
 
-        let mut capped = bound(|cfg| cfg.max_entry_s = 16.0, "");
-        assert_eq!(sells(&mut capped, "late", T0 + 16_001, 0.3), None);
-        assert_eq!(capped.phase_name(), "wait");
-        assert!(!capped.needs_pool_tape());
+        let mut edge = bound(|_| {}, "");
+        assert_eq!(sells(&mut edge, "edge", T0 + 8_000, 0.4), Some("BUY"));
 
-        let mut edge = bound(|cfg| cfg.max_entry_s = 16.0, "");
-        assert_eq!(sells(&mut edge, "edge", T0 + 16_000, 0.3), Some("BUY"));
+        let mut open = bound(|cfg| cfg.max_entry_s = 0.0, "");
+        assert_eq!(sells(&mut open, "open", T0 + 60_000, 0.4), Some("BUY"));
+        assert_eq!(open.phase_name(), "pending");
     }
 
     #[test]
@@ -683,33 +722,39 @@ mod tests {
         let fill = 50e-9;
         tp.on_buy_fill(fill, T0 + 5_000);
         let mut under = print("SELL", 0.05, "under", T0 + 6_000);
-        under.price = fill * 1.39;
+        under.price = fill * 1.29;
         assert_eq!(tp.on_event(&under), None);
         let mut took = print("SELL", 0.05, "tp", T0 + 6_000);
-        took.price = fill * 1.41;
+        took.price = fill * 1.31;
         assert_eq!(tp.on_event(&took), Some("SELL"));
         assert_eq!(tp.last_sell_reason(), "take_profit");
 
-        let mut held = bound(|cfg| cfg.take_profit = 0.0, "");
+        let mut held = bound(
+            |cfg| {
+                cfg.take_profit = 0.0;
+                cfg.max_hold_s = 0.0;
+            },
+            "",
+        );
         arm(&mut held);
         held.on_buy_fill(fill, T0 + 5_000);
         assert_eq!(held.on_clock(T0 + 5_000 + 45_000, fill), None);
         assert_eq!(held.phase_name(), "hold");
 
-        let mut capped = bound(
+        let mut capped = bound(|cfg| cfg.take_profit = 0.0, "");
+        arm(&mut capped);
+        capped.on_buy_fill(fill, T0 + 5_000);
+        assert_eq!(capped.on_clock(T0 + 5_000 + 29_999, fill), None);
+        assert_eq!(capped.on_clock(T0 + 5_000 + 30_000, fill), Some("SELL"));
+        assert_eq!(capped.last_sell_reason(), "hold_time");
+
+        let mut target = bound(
             |cfg| {
                 cfg.take_profit = 0.0;
-                cfg.max_hold_s = 45.0;
+                cfg.first_cycle_only = false;
             },
             "",
         );
-        arm(&mut capped);
-        capped.on_buy_fill(fill, T0 + 5_000);
-        assert_eq!(capped.on_clock(T0 + 5_000 + 44_999, fill), None);
-        assert_eq!(capped.on_clock(T0 + 5_000 + 45_000, fill), Some("SELL"));
-        assert_eq!(capped.last_sell_reason(), "hold_time");
-
-        let mut target = bound(|cfg| cfg.take_profit = 0.0, "");
         arm(&mut target);
         target.on_buy_fill(fill, T0 + 5_000);
         let mut partial = print("SELL", 0.05, "partial", T0 + 6_000);
@@ -752,13 +797,13 @@ mod tests {
         );
         arm(&mut engine);
         engine.on_buy_fill(50e-9, T0 + 5_000);
-        let mut tp = print("SELL", 0.05, "tp", T0 + 8_000);
+        let mut tp = print("SELL", 0.05, "tp", T0 + 6_000);
         tp.price = 50e-9 * 1.25;
         assert_eq!(engine.on_event(&tp), Some("SELL"));
         assert_eq!(engine.phase_name(), "wait");
         engine.on_sell_fill();
         assert_eq!(engine.phase_name(), "seek_sell");
-        assert_eq!(sells(&mut engine, "again", T0 + 10_000, 0.3), Some("BUY"));
+        assert_eq!(sells(&mut engine, "again", T0 + 7_000, 0.4), Some("BUY"));
     }
 
     #[test]
@@ -782,11 +827,11 @@ mod tests {
         during.wallet = "target".to_string();
         during.token_amount = 1_000.0;
         assert_eq!(engine.on_event(&during), None);
-        assert_eq!(engine.phase_name(), "idle");
+        assert_eq!(engine.phase_name(), "done");
         engine.on_buy_fill(50e-9, T0 + 6_000);
         assert_eq!(engine.phase_name(), "hold");
         engine.apply_missed_target_sell();
-        assert_eq!(engine.phase_name(), "idle");
+        assert_eq!(engine.phase_name(), "done");
         assert_eq!(engine.last_sell_reason(), "target_sell");
     }
 }

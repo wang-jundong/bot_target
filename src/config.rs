@@ -130,6 +130,8 @@ pub struct StrategyV031Config {
     pub max_entry_s: f64,
     pub buy_hit_count: u32,
     pub buy_hit_min: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
@@ -141,8 +143,10 @@ pub struct StrategyV031Config {
 }
 
 impl StrategyV031Config {
-    /// Knobs from scalpingbot `config/strategy_v_031.json` (2026-10-16 tune).
-    /// `size_sol` stays at the live position size, not the backtest size.
+    /// Knobs from scalpingbot `config/strategy_v_031.json` (2026-10-21).
+    /// `max_mc_sol` is 0, so only the 40 SOL floor applies. Zero `min_mc_sol`
+    /// or `max_mc_sol` disables that bound. `size_sol` stays at the live
+    /// position size, not the backtest size.
     pub fn default_v031() -> Self {
         let mut cfg = Self {
             gate_wallet: "3VUNtVtjjx5ckUojT7UocJ5fbuAJRsNUXNfTBnPte9vC".to_string(),
@@ -151,6 +155,8 @@ impl StrategyV031Config {
             max_entry_s: 16.0,
             buy_hit_count: 4,
             buy_hit_min: 1.0,
+            min_mc_sol: 40.0,
+            max_mc_sol: 0.0,
             sell_hit_count: 5,
             sell_hit_min: 4.0,
             take_profit: 0.4,
@@ -178,6 +184,8 @@ pub struct StrategyV051Config {
     pub max_entry_s: f64,
     pub buy_hit_count: u32,
     pub buy_hit_min: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
@@ -189,24 +197,26 @@ pub struct StrategyV051Config {
 }
 
 impl StrategyV051Config {
-    /// Knobs from scalpingbot `config/strategy_v_051.json` (2026-10-16).
-    /// Zero `min_entry_s`, `max_entry_s`, and `max_hold_s` disable those caps.
-    /// `size_sol` is the live position size.
+    /// Knobs from scalpingbot `config/strategy_v_051.json` (2026-10-21 walk-forward).
+    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
+    /// `max_hold_s` disable those bounds. `size_sol` is the live position size.
     pub fn default_v051() -> Self {
         let mut cfg = Self {
             gate_wallet: "HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB".to_string(),
-            dust_sol: 0.1,
+            dust_sol: 0.3,
             min_entry_s: 0.0,
-            max_entry_s: 0.0,
-            buy_hit_count: 4,
+            max_entry_s: 8.0,
+            buy_hit_count: 3,
             buy_hit_min: 1.0,
+            min_mc_sol: 40.0,
+            max_mc_sol: 100.0,
             sell_hit_count: 5,
             sell_hit_min: 4.0,
-            take_profit: 0.4,
-            max_hold_s: 0.0,
+            take_profit: 0.3,
+            max_hold_s: 30.0,
             target_sell_exit: true,
-            first_cycle_only: false,
-            repeat_entries: false,
+            first_cycle_only: true,
+            repeat_entries: true,
             size_sol: 1.0,
         };
         if cfg.buy_hit_count < 1 {
