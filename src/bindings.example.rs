@@ -35,8 +35,12 @@ pub const STRATEGY_V_031_PRIVATE_KEY_ENCRYPTED: &str = "";
 pub const STRATEGY_V_031_PRIVATE_KEY_BASE58: &str = "";
 pub const STRATEGY_V_051_PRIVATE_KEY_ENCRYPTED: &str = "";
 pub const STRATEGY_V_051_PRIVATE_KEY_BASE58: &str = "";
+pub const STRATEGY_V_061_PRIVATE_KEY_ENCRYPTED: &str = "";
+pub const STRATEGY_V_061_PRIVATE_KEY_BASE58: &str = "";
 pub const STRATEGY_V_071_PRIVATE_KEY_ENCRYPTED: &str = "";
 pub const STRATEGY_V_071_PRIVATE_KEY_BASE58: &str = "";
+pub const STRATEGY_V_101_PRIVATE_KEY_ENCRYPTED: &str = "";
+pub const STRATEGY_V_101_PRIVATE_KEY_BASE58: &str = "";
 
 pub const BUY_SLIPPAGE_BPS: u64 = 1200;
 pub const SELL_SLIPPAGE_BPS: u64 = 5000;

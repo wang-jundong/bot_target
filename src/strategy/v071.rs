@@ -4,12 +4,12 @@
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
 //! Knobs from `config/strategy_v_071.json` (2026-10-17).
 //! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, or `max_hold_s`
-//! of 0 disables that bound. Max sell is 95% of the bag, matching that book.
+//! of 0 disables that bound. Max sell is 80% of the bag.
 //! One instance per mint.
 
 use crate::config::StrategyV071Config;
 use crate::strategy::common::{
-    ChainCursor, MarketEvent, SELL_RETRY_MS, cursor_of, is_strictly_after, round,
+    ChainCursor, MarketEvent, SELL_RETRY_MS, cursor_of, is_max_sell, is_strictly_after, round,
 };
 
 pub const STRATEGY_NAME: &str = "strategy_v_071";
@@ -23,8 +23,6 @@ const PHASE_DONE: u8 = 5;
 
 const SIDE_BUY: u8 = 1;
 const SIDE_SELL: u8 = 2;
-
-const MAX_SELL_FRAC: f64 = 0.95;
 
 const PHASE_NAMES: [&str; 6] = ["idle", "seek_sell", "pending", "hold", "wait", "done"];
 
@@ -81,16 +79,6 @@ fn fresh_state() -> FlowState {
 fn clear_streak(st: &mut FlowState) {
     st.streak_side = 0;
     st.prints.clear();
-}
-
-fn is_max_sell(held: f64, sold: f64) -> bool {
-    if sold <= 0.0 {
-        return false;
-    }
-    if held <= 0.0 {
-        return true;
-    }
-    sold >= held * MAX_SELL_FRAC
 }
 
 pub struct StrategyV071Engine {
@@ -786,11 +774,11 @@ mod tests {
         arm(&mut target);
         target.on_buy_fill(fill, T0 + 2_000);
         assert_eq!(
-            target.on_event(&target_trade("SELL", 0.05, 900.0, "partial", T0 + 3_000, 2)),
+            target.on_event(&target_trade("SELL", 0.05, 100.0, "partial", T0 + 3_000, 2)),
             None
         );
         assert_eq!(
-            target.on_event(&target_trade("SELL", 0.05, 100.0, "max", T0 + 4_000, 3)),
+            target.on_event(&target_trade("SELL", 0.05, 900.0, "max", T0 + 4_000, 3)),
             Some("SELL")
         );
         assert_eq!(target.last_sell_reason(), "target_sell");

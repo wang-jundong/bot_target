@@ -91,6 +91,26 @@ async fn main() -> anyhow::Result<()> {
                     "[01 STARTUP] Strategy knobs"
                 );
             }
+            bot_target::config::StrategyName::V061 => {
+                let c = &config.strategy_v061;
+                tracing::info!(
+                    strategy = plan.name.as_str(),
+                    target_wallet = %plan.target_wallet,
+                    size_sol = c.size_sol,
+                    min_entry_s = c.min_entry_s,
+                    max_entry_s = c.max_entry_s,
+                    max_chase = c.max_chase,
+                    min_mc_sol = c.min_mc_sol,
+                    max_mc_sol = c.max_mc_sol,
+                    sell_hit_count = c.sell_hit_count,
+                    sell_hit_min = c.sell_hit_min,
+                    take_profit = c.take_profit,
+                    max_hold_s = c.max_hold_s,
+                    second_buy_exit = c.second_buy_exit,
+                    repeat_entries = c.repeat_entries,
+                    "[01 STARTUP] Strategy knobs"
+                );
+            }
             bot_target::config::StrategyName::V071 => {
                 let c = &config.strategy_v071;
                 tracing::info!(
@@ -99,6 +119,28 @@ async fn main() -> anyhow::Result<()> {
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
                     max_entry_s = c.max_entry_s,
+                    min_mc_sol = c.min_mc_sol,
+                    max_mc_sol = c.max_mc_sol,
+                    sell_hit_count = c.sell_hit_count,
+                    sell_hit_min = c.sell_hit_min,
+                    take_profit = c.take_profit,
+                    max_hold_s = c.max_hold_s,
+                    second_buy_exit = c.second_buy_exit,
+                    repeat_entries = c.repeat_entries,
+                    "[01 STARTUP] Strategy knobs"
+                );
+            }
+            bot_target::config::StrategyName::V101 => {
+                let c = &config.strategy_v101;
+                tracing::info!(
+                    strategy = plan.name.as_str(),
+                    target_wallet = %plan.target_wallet,
+                    size_sol = c.size_sol,
+                    min_entry_s = c.min_entry_s,
+                    max_entry_s = c.max_entry_s,
+                    max_chase = c.max_chase,
+                    buy_hit_count = c.buy_hit_count,
+                    buy_hit_min = c.buy_hit_min,
                     min_mc_sol = c.min_mc_sol,
                     max_mc_sol = c.max_mc_sol,
                     sell_hit_count = c.sell_hit_count,
