@@ -14,6 +14,7 @@ pub enum StrategyName {
     V051,
     V061,
     V071,
+    V081,
     V101,
 }
 
@@ -26,6 +27,7 @@ impl StrategyName {
             Self::V051 => "strategy_v_051",
             Self::V061 => "strategy_v_061",
             Self::V071 => "strategy_v_071",
+            Self::V081 => "strategy_v_081",
             Self::V101 => "strategy_v_101",
         }
     }
@@ -38,6 +40,7 @@ impl StrategyName {
             "strategy_v_051" => Some(Self::V051),
             "strategy_v_061" => Some(Self::V061),
             "strategy_v_071" => Some(Self::V071),
+            "strategy_v_081" => Some(Self::V081),
             "strategy_v_101" => Some(Self::V101),
             _ => None,
         }
@@ -336,6 +339,76 @@ impl StrategyV071Config {
 }
 
 #[derive(Debug, Clone)]
+pub struct StrategyV081Config {
+    pub gate_wallet: String,
+    pub dust_sol: f64,
+    pub min_entry_s: f64,
+    pub max_entry_s: f64,
+    pub min_price_ratio: f64,
+    pub max_price_ratio: f64,
+    pub buy_hit_count: u32,
+    pub buy_hit_min: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
+    pub min_largest_buy_sol: f64,
+    pub max_largest_buy_sol: f64,
+    pub sell_hit_count: u32,
+    pub sell_hit_min: f64,
+    pub take_profit: f64,
+    pub max_hold_s: f64,
+    pub hold_sell_s: f64,
+    pub min_largest_sell_sol: f64,
+    pub max_largest_sell_sol: f64,
+    pub target_sell_exit: bool,
+    pub second_buy_exit: bool,
+    pub first_cycle_only: bool,
+    pub repeat_entries: bool,
+    pub size_sol: f64,
+}
+
+impl StrategyV081Config {
+    /// Knobs from scalpingbot `config/strategy_v_081.json` (2026-10-22).
+    /// `buy_hit_count` of 0 is clock entry. Zero `min_entry_s`, `max_entry_s`,
+    /// `min_mc_sol`, `max_mc_sol`, `min_largest_buy_sol`, `max_largest_buy_sol`,
+    /// `min_price_ratio`, `max_price_ratio`, `hold_sell_s`, `min_largest_sell_sol`,
+    /// `max_largest_sell_sol`, and `max_hold_s` disable those bounds.
+    /// `min_mc_sol` is 0, so only the 80 SOL cap applies. `size_sol` matches
+    /// that config.
+    pub fn default_v081() -> Self {
+        let mut cfg = Self {
+            gate_wallet: "ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT".to_string(),
+            dust_sol: 0.3,
+            min_entry_s: 0.5,
+            max_entry_s: 8.0,
+            min_price_ratio: 1.0,
+            max_price_ratio: 1.5,
+            buy_hit_count: 0,
+            buy_hit_min: 0.0,
+            min_mc_sol: 0.0,
+            max_mc_sol: 80.0,
+            min_largest_buy_sol: 2.0,
+            max_largest_buy_sol: 6.0,
+            sell_hit_count: 3,
+            sell_hit_min: 4.0,
+            take_profit: 0.4,
+            max_hold_s: 30.0,
+            hold_sell_s: 8.0,
+            min_largest_sell_sol: 2.0,
+            max_largest_sell_sol: 5.0,
+            target_sell_exit: true,
+            second_buy_exit: false,
+            first_cycle_only: true,
+            repeat_entries: true,
+            size_sol: 0.3,
+        };
+        if cfg.sell_hit_count < 1 {
+            cfg.sell_hit_count = 1;
+        }
+        cfg
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StrategyV101Config {
     pub gate_wallet: String,
     pub dust_sol: f64,
@@ -418,6 +491,7 @@ pub struct AppConfig {
     pub strategy_v051: StrategyV051Config,
     pub strategy_v061: StrategyV061Config,
     pub strategy_v071: StrategyV071Config,
+    pub strategy_v081: StrategyV081Config,
     pub strategy_v101: StrategyV101Config,
     pub blocked_mints: String,
     pub vibe_grpc_endpoint: String,
@@ -471,6 +545,7 @@ pub fn load_config() -> Result<AppConfig> {
     let strategy_v051 = StrategyV051Config::default_v051();
     let strategy_v061 = StrategyV061Config::default_v061();
     let strategy_v071 = StrategyV071Config::default_v071();
+    let strategy_v081 = StrategyV081Config::default_v081();
     let strategy_v101 = StrategyV101Config::default_v101();
     let mut strategy_plans = Vec::with_capacity(active.len());
     for name in &active {
@@ -482,6 +557,7 @@ pub fn load_config() -> Result<AppConfig> {
             &strategy_v051,
             &strategy_v061,
             &strategy_v071,
+            &strategy_v081,
             &strategy_v101,
         )?);
     }
@@ -500,6 +576,7 @@ pub fn load_config() -> Result<AppConfig> {
         strategy_v051,
         strategy_v061,
         strategy_v071,
+        strategy_v081,
         strategy_v101,
         blocked_mints: settings::BLOCKED_MINTS.to_string(),
         vibe_grpc_endpoint: vibe_endpoint,
@@ -542,6 +619,7 @@ fn build_plan(
     v051: &StrategyV051Config,
     v061: &StrategyV061Config,
     v071: &StrategyV071Config,
+    v081: &StrategyV081Config,
     v101: &StrategyV101Config,
 ) -> Result<StrategyPlan> {
     let (target_wallet, size_sol, max_mc, target_sell_exit, first_cycle_only) = match name {
@@ -586,6 +664,13 @@ fn build_plan(
             0.0,
             v071.target_sell_exit,
             v071.first_cycle_only,
+        ),
+        StrategyName::V081 => (
+            v081.gate_wallet.clone(),
+            v081.size_sol,
+            0.0,
+            v081.target_sell_exit,
+            v081.first_cycle_only,
         ),
         StrategyName::V101 => (
             v101.gate_wallet.clone(),
@@ -641,6 +726,10 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
         StrategyName::V071 => (
             settings::STRATEGY_V_071_PRIVATE_KEY_ENCRYPTED,
             settings::STRATEGY_V_071_PRIVATE_KEY_BASE58,
+        ),
+        StrategyName::V081 => (
+            settings::STRATEGY_V_081_PRIVATE_KEY_ENCRYPTED,
+            settings::STRATEGY_V_081_PRIVATE_KEY_BASE58,
         ),
         StrategyName::V101 => (
             settings::STRATEGY_V_101_PRIVATE_KEY_ENCRYPTED,
