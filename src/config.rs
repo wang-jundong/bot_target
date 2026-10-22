@@ -141,6 +141,13 @@ pub struct StrategyV031Config {
     pub buy_hit_min: f64,
     pub min_mc_sol: f64,
     pub max_mc_sol: f64,
+    pub min_largest_buy_sol: f64,
+    pub max_largest_buy_sol: f64,
+    pub min_price_ratio: f64,
+    pub max_price_ratio: f64,
+    pub round_trip_window_s: f64,
+    pub min_round_trip_holders: u32,
+    pub max_round_trip_holders: u32,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
@@ -152,10 +159,14 @@ pub struct StrategyV031Config {
 }
 
 impl StrategyV031Config {
-    /// Knobs from scalpingbot `config/strategy_v_031.json` (2026-10-21).
-    /// `max_mc_sol` is 0, so only the 40 SOL floor applies. Zero `min_mc_sol`
-    /// or `max_mc_sol` disables that bound. `size_sol` stays at the live
-    /// position size, not the backtest size.
+    /// Knobs from scalpingbot `config/strategy_v_031.json` (2026-10-22).
+    /// `max_mc_sol` is 0, so only the 40 SOL floor applies. The live book
+    /// blocks an entry once another wallet has bought more than 5 SOL.
+    /// Zero `min_mc_sol`, `max_mc_sol`, `min_largest_buy_sol`,
+    /// `max_largest_buy_sol`, `min_price_ratio`, or `max_price_ratio` disables
+    /// that bound. A zero `round_trip_window_s`, or both holder bounds at 0,
+    /// turns the holder sell off. `size_sol` stays at the live position size,
+    /// not the backtest size.
     pub fn default_v031() -> Self {
         let mut cfg = Self {
             gate_wallet: "3VUNtVtjjx5ckUojT7UocJ5fbuAJRsNUXNfTBnPte9vC".to_string(),
@@ -166,6 +177,13 @@ impl StrategyV031Config {
             buy_hit_min: 1.0,
             min_mc_sol: 40.0,
             max_mc_sol: 0.0,
+            min_largest_buy_sol: 0.0,
+            max_largest_buy_sol: 5.0,
+            min_price_ratio: 0.0,
+            max_price_ratio: 0.0,
+            round_trip_window_s: 0.0,
+            min_round_trip_holders: 0,
+            max_round_trip_holders: 0,
             sell_hit_count: 5,
             sell_hit_min: 4.0,
             take_profit: 0.4,
@@ -180,6 +198,13 @@ impl StrategyV031Config {
         }
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
+        }
+        if cfg.round_trip_window_s <= 0.0
+            || (cfg.min_round_trip_holders == 0 && cfg.max_round_trip_holders == 0)
+        {
+            cfg.round_trip_window_s = 0.0;
+            cfg.min_round_trip_holders = 0;
+            cfg.max_round_trip_holders = 0;
         }
         cfg
     }
@@ -430,11 +455,14 @@ pub struct StrategyV101Config {
     pub dust_sol: f64,
     pub min_entry_s: f64,
     pub max_entry_s: f64,
-    pub max_chase: f64,
+    pub min_price_ratio: f64,
+    pub max_price_ratio: f64,
     pub buy_hit_count: u32,
     pub buy_hit_min: f64,
     pub min_mc_sol: f64,
     pub max_mc_sol: f64,
+    pub min_largest_buy_sol: f64,
+    pub max_largest_buy_sol: f64,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
@@ -447,34 +475,35 @@ pub struct StrategyV101Config {
 }
 
 impl StrategyV101Config {
-    /// Knobs from scalpingbot `config/strategy_v_101.json` (2026-10-20).
-    /// Zero `min_entry_s`, `max_entry_s`, `max_chase`, `min_mc_sol`,
-    /// `max_mc_sol`, and `max_hold_s` disable those bounds. `size_sol` matches
-    /// that config.
+    /// Knobs from scalpingbot `config/strategy_v_101.json` (2026-10-23).
+    /// `buy_hit_count` of 0 buys the first print inside the clock. Zero
+    /// `min_entry_s`, `max_entry_s`, `min_price_ratio`, `max_price_ratio`,
+    /// `min_mc_sol`, `max_mc_sol`, `min_largest_buy_sol`, `max_largest_buy_sol`,
+    /// and `max_hold_s` disable those bounds. `size_sol` matches that config.
     pub fn default_v101() -> Self {
         let mut cfg = Self {
             gate_wallet: "BNnN2MqfWLvgThYBsv6v8JQaYZXYKYahC5YCy27Ct1cX".to_string(),
-            dust_sol: 0.25,
+            dust_sol: 0.2,
             min_entry_s: 2.0,
-            max_entry_s: 37.5,
-            max_chase: 0.6,
-            buy_hit_count: 4,
-            buy_hit_min: 1.5,
-            min_mc_sol: 55.0,
-            max_mc_sol: 150.0,
-            sell_hit_count: 4,
-            sell_hit_min: 10.0,
-            take_profit: 0.8,
+            max_entry_s: 60.0,
+            min_price_ratio: 1.1,
+            max_price_ratio: 1.4,
+            buy_hit_count: 0,
+            buy_hit_min: 0.5,
+            min_mc_sol: 0.0,
+            max_mc_sol: 0.0,
+            min_largest_buy_sol: 0.0,
+            max_largest_buy_sol: 8.0,
+            sell_hit_count: 2,
+            sell_hit_min: 6.0,
+            take_profit: 2.0,
             max_hold_s: 0.0,
-            target_sell_exit: false,
+            target_sell_exit: true,
             second_buy_exit: false,
             first_cycle_only: true,
             repeat_entries: true,
             size_sol: 0.3,
         };
-        if cfg.buy_hit_count < 1 {
-            cfg.buy_hit_count = 1;
-        }
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
         }

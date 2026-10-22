@@ -1,9 +1,15 @@
 //! strategy_v_031 — sliding sell-hit inside a time gate.
 //!
-//! Same flow as scalpingbot `strategy_v_031.py`. Market cap is the signal
-//! price times 1e9. A window below `min_mc_sol` or above `max_mc_sol`
-//! (0 disables that bound) slides and the search continues.
+//! Same flow as scalpingbot `strategy_v_031.py` (2026-10-22). Market cap is
+//! the signal price times 1e9. A window outside the market-cap, largest-buy,
+//! or price-ratio bounds slides and the search continues. A zero bound
+//! disables that gate. The largest buy is the biggest other-wallet buy since
+//! this cycle's target buy. The signal print is not part of that max, and a
+//! buy at or below the dust still counts. `round_trip_window_s` is a trailing
+//! holder window, not a hold clock. Our own prints are not other-wallet flow.
 //! One instance per mint.
+
+use std::collections::HashMap;
 
 use crate::config::StrategyV031Config;
 use crate::strategy::common::{
@@ -36,6 +42,9 @@ struct FlowState {
     target_tokens: f64,
     t0_ms: u64,
     px0: f64,
+    largest_buy_sol: f64,
+    rt_buy_ms: HashMap<String, u64>,
+    rt_sell_ms: HashMap<String, u64>,
     now_ms: u64,
     diag: BuyDiag,
     opened_at: Option<ChainCursor>,
@@ -48,6 +57,9 @@ pub struct BuyDiag {
     pub end_ret: f64,
     pub mcap: f64,
     pub buy_hit_sol: f64,
+    pub largest_buy_sol: f64,
+    pub price_ratio: f64,
+    pub round_trip_holders: u32,
 }
 
 fn fresh_state() -> FlowState {
@@ -63,6 +75,9 @@ fn fresh_state() -> FlowState {
         target_tokens: 0.0,
         t0_ms: 0,
         px0: 0.0,
+        largest_buy_sol: 0.0,
+        rt_buy_ms: HashMap::new(),
+        rt_sell_ms: HashMap::new(),
         now_ms: 0,
         diag: BuyDiag::default(),
         opened_at: None,
@@ -204,6 +219,7 @@ impl StrategyV031Engine {
     }
 
     pub fn on_clock(&mut self, now_ms: u64, mark_px: f64) -> Option<&'static str> {
+        self.st.now_ms = now_ms;
         if self.exit_retry {
             if now_ms < self.exit_retry_at_ms {
                 return None;
@@ -273,6 +289,7 @@ impl StrategyV031Engine {
             event.price,
             is_target,
             is_own,
+            &event.wallet,
             event.timestamp_ms,
             cursor_of(event),
         );
@@ -291,6 +308,7 @@ impl StrategyV031Engine {
                     "sell_hit" => format!("sell_hit {:.2} SOL", self.st.exit_sol),
                     "take_profit" => "take_profit".to_string(),
                     "hold_time" => "hold_time".to_string(),
+                    "round_trip" => format!("round_trip {}", self.round_trip_count()),
                     _ => "target_sell".to_string(),
                 };
                 Some("SELL")
@@ -346,6 +364,110 @@ impl StrategyV031Engine {
         clear_streak(&mut self.st);
     }
 
+    fn note_other_buy(&mut self, side: u8, sol: f64, is_target: bool, is_own: bool) {
+        if self.st.phase != PHASE_SEEK_SELL || is_target || is_own || side != SIDE_BUY || sol <= 0.0
+        {
+            return;
+        }
+        if sol > self.st.largest_buy_sol {
+            self.st.largest_buy_sol = sol;
+        }
+    }
+
+    fn largest_buy_blocks(&self) -> bool {
+        let seen = self.st.largest_buy_sol;
+        if self.cfg.min_largest_buy_sol > 0.0 && seen < self.cfg.min_largest_buy_sol {
+            return true;
+        }
+        if self.cfg.max_largest_buy_sol > 0.0 && seen > self.cfg.max_largest_buy_sol {
+            return true;
+        }
+        false
+    }
+
+    fn price_ratio_blocks(&self, px: f64) -> bool {
+        let lo = self.cfg.min_price_ratio;
+        let hi = self.cfg.max_price_ratio;
+        if lo <= 0.0 && hi <= 0.0 {
+            return false;
+        }
+        if self.st.px0 <= 0.0 || px <= 0.0 {
+            return true;
+        }
+        let ratio = round(px / self.st.px0, 4);
+        if lo > 0.0 && ratio < lo {
+            return true;
+        }
+        if hi > 0.0 && ratio > hi {
+            return true;
+        }
+        false
+    }
+
+    fn note_round_trip(
+        &mut self,
+        wallet: &str,
+        side: u8,
+        sol: f64,
+        tokens: f64,
+        is_target: bool,
+        is_own: bool,
+    ) {
+        if is_target
+            || is_own
+            || wallet.is_empty()
+            || self.st.phase == PHASE_IDLE
+            || self.st.phase == PHASE_DONE
+        {
+            return;
+        }
+        if side == SIDE_BUY && sol > 0.0 {
+            self.st.rt_buy_ms.insert(wallet.to_string(), self.st.now_ms);
+            return;
+        }
+        if side == SIDE_SELL && sol > 0.0 && tokens > 0.0 {
+            self.st.rt_sell_ms.insert(wallet.to_string(), self.st.now_ms);
+        }
+    }
+
+    fn round_trip_count(&self) -> usize {
+        if self.cfg.round_trip_window_s <= 0.0 {
+            return self
+                .st
+                .rt_buy_ms
+                .keys()
+                .filter(|wallet| self.st.rt_sell_ms.contains_key(*wallet))
+                .count();
+        }
+        let span = self.cfg.round_trip_window_s * 1000.0;
+        let now = self.st.now_ms as f64;
+        self.st
+            .rt_buy_ms
+            .iter()
+            .filter(|(wallet, buy_ms)| {
+                let Some(sell_ms) = self.st.rt_sell_ms.get(*wallet) else {
+                    return false;
+                };
+                now - **buy_ms as f64 <= span && now - *sell_ms as f64 <= span
+            })
+            .count()
+    }
+
+    fn round_trip_exit(&self) -> bool {
+        if self.cfg.round_trip_window_s <= 0.0 {
+            return false;
+        }
+        if self.age_s(self.st.now_ms) < self.cfg.round_trip_window_s {
+            return false;
+        }
+        let n = self.round_trip_count();
+        let under =
+            self.cfg.min_round_trip_holders > 0 && n < self.cfg.min_round_trip_holders as usize;
+        let over =
+            self.cfg.max_round_trip_holders > 0 && n >= self.cfg.max_round_trip_holders as usize;
+        under || over
+    }
+
     fn flow_step(
         &mut self,
         side: u8,
@@ -354,10 +476,12 @@ impl StrategyV031Engine {
         px: f64,
         is_target: bool,
         is_own: bool,
+        wallet: &str,
         now_ms: u64,
         order: ChainCursor,
     ) -> Option<&'static str> {
         self.st.now_ms = now_ms;
+        self.note_round_trip(wallet, side, sol, tokens, is_target, is_own);
         if is_target
             && side == SIDE_BUY
             && self
@@ -371,6 +495,24 @@ impl StrategyV031Engine {
             return None;
         }
 
+        let signal = self.flow_inner(side, sol, tokens, px, is_target, is_own, now_ms, order);
+        if signal != Some("BUY") {
+            self.note_other_buy(side, sol, is_target, is_own);
+        }
+        signal
+    }
+
+    fn flow_inner(
+        &mut self,
+        side: u8,
+        sol: f64,
+        tokens: f64,
+        px: f64,
+        is_target: bool,
+        is_own: bool,
+        now_ms: u64,
+        order: ChainCursor,
+    ) -> Option<&'static str> {
         if is_target && side == SIDE_BUY {
             self.st.target_tokens += tokens.max(0.0);
             self.st.opened_at = Some(order);
@@ -406,6 +548,9 @@ impl StrategyV031Engine {
             self.st.hit_sol = 0.0;
             self.st.t0_ms = now_ms;
             self.st.px0 = px;
+            self.st.largest_buy_sol = 0.0;
+            self.st.rt_buy_ms.clear();
+            self.st.rt_sell_ms.clear();
             clear_streak(&mut self.st);
             return None;
         }
@@ -464,10 +609,17 @@ impl StrategyV031Engine {
             };
             if (self.cfg.min_mc_sol > 0.0 && mcap < self.cfg.min_mc_sol)
                 || (self.cfg.max_mc_sol > 0.0 && mcap > self.cfg.max_mc_sol)
+                || self.largest_buy_blocks()
+                || self.price_ratio_blocks(px)
             {
                 self.st.prints.remove(0);
                 return None;
             }
+            let price_ratio = if self.st.px0 > 0.0 && px > 0.0 {
+                round(px / self.st.px0, 4)
+            } else {
+                0.0
+            };
             self.st.hit_sol = total;
             self.st.phase = PHASE_PENDING;
             self.st.why = "buy_hit".to_string();
@@ -477,6 +629,9 @@ impl StrategyV031Engine {
                 end_ret: round(chase, 4),
                 mcap: round(mcap, 3),
                 buy_hit_sol: round(total, 4),
+                largest_buy_sol: round(self.st.largest_buy_sol, 4),
+                price_ratio,
+                round_trip_holders: self.round_trip_count() as u32,
             };
             clear_streak(&mut self.st);
             return Some("BUY");
@@ -521,6 +676,12 @@ impl StrategyV031Engine {
         {
             self.st.phase = PHASE_WAIT;
             self.st.why = "take_profit".to_string();
+            clear_streak(&mut self.st);
+            return Some("SELL");
+        }
+        if self.round_trip_exit() {
+            self.st.phase = PHASE_WAIT;
+            self.st.why = "round_trip".to_string();
             clear_streak(&mut self.st);
             return Some("SELL");
         }
@@ -612,6 +773,13 @@ mod tests {
         assert_eq!(loaded.buy_hit_min, 1.0);
         assert_eq!(loaded.min_mc_sol, 40.0);
         assert_eq!(loaded.max_mc_sol, 0.0);
+        assert_eq!(loaded.min_largest_buy_sol, 0.0);
+        assert_eq!(loaded.max_largest_buy_sol, 5.0);
+        assert_eq!(loaded.min_price_ratio, 0.0);
+        assert_eq!(loaded.max_price_ratio, 0.0);
+        assert_eq!(loaded.round_trip_window_s, 0.0);
+        assert_eq!(loaded.min_round_trip_holders, 0);
+        assert_eq!(loaded.max_round_trip_holders, 0);
         assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 4.0);
         assert_eq!(loaded.take_profit, 0.4);
@@ -638,6 +806,135 @@ mod tests {
         assert_eq!(engine.last_buy_diag().wall_s, 5.0);
         assert_eq!(engine.last_buy_diag().end_ret, 0.0);
         assert_eq!(engine.last_buy_diag().mcap, 50.0);
+        assert_eq!(engine.last_buy_diag().largest_buy_sol, 0.0);
+        assert_eq!(engine.last_buy_diag().price_ratio, 1.0);
+        assert_eq!(engine.last_buy_diag().round_trip_holders, 0);
+    }
+
+    #[test]
+    fn largest_buy_above_five_sol_slides_the_window() {
+        let mut capped = bound(|_| {}, "");
+        let mut whale = print("BUY", 5.01, "whale", T0 + 1_000);
+        whale.token_amount = 10.0;
+        assert_eq!(capped.on_event(&whale), None);
+        assert_eq!(sells(&mut capped, "blocked", T0 + 5_000, 0.3), None);
+        assert_eq!(capped.phase_name(), "seek_sell");
+
+        let mut equal = bound(|_| {}, "");
+        let mut at_cap = print("BUY", 5.0, "at-cap", T0 + 1_000);
+        at_cap.token_amount = 10.0;
+        assert_eq!(equal.on_event(&at_cap), None);
+        assert_eq!(sells(&mut equal, "ok", T0 + 5_000, 0.3), Some("BUY"));
+        assert_eq!(equal.last_buy_diag().largest_buy_sol, 5.0);
+
+        let mut dusty = bound(|cfg| cfg.min_largest_buy_sol = 0.05, "");
+        assert_eq!(dusty.on_event(&print("BUY", 0.05, "dust", T0 + 1_000)), None);
+        assert_eq!(sells(&mut dusty, "dust-ok", T0 + 5_000, 0.3), Some("BUY"));
+        assert_eq!(dusty.last_buy_diag().largest_buy_sol, 0.05);
+
+        let mut target = bound(|_| {}, "");
+        assert_eq!(
+            target.on_event(&{
+                let mut bag = print("BUY", 9.0, "bag", T0 + 1_000);
+                bag.wallet = "target".to_string();
+                bag.token_amount = 100.0;
+                bag.slot = 2;
+                bag
+            }),
+            None
+        );
+        assert_eq!(sells(&mut target, "no-other", T0 + 5_000, 0.3), Some("BUY"));
+        assert_eq!(target.last_buy_diag().largest_buy_sol, 0.0);
+
+        let mut own = bound(|_| {}, "me");
+        let mut mine = print("BUY", 9.0, "mine", T0 + 1_000);
+        mine.wallet = "me".to_string();
+        assert_eq!(own.on_event(&mine), None);
+        assert_eq!(sells(&mut own, "own", T0 + 5_000, 0.3), Some("BUY"));
+        assert_eq!(own.last_buy_diag().largest_buy_sol, 0.0);
+    }
+
+    #[test]
+    fn price_ratio_bounds_are_inclusive() {
+        let mut engine = bound(
+            |cfg| {
+                cfg.min_price_ratio = 1.0;
+                cfg.max_price_ratio = 1.6;
+            },
+            "",
+        );
+        for i in 0..4 {
+            let mut hot = print("SELL", 0.3, &format!("hot-{i}"), T0 + 5_000);
+            hot.price = 50e-9 * 1.61;
+            assert_eq!(engine.on_event(&hot), None);
+        }
+        assert_eq!(engine.phase_name(), "seek_sell");
+        let mut cap = print("SELL", 0.3, "cap", T0 + 6_000);
+        cap.price = 50e-9 * 1.6;
+        assert_eq!(engine.on_event(&cap), Some("BUY"));
+        assert_eq!(engine.last_buy_diag().price_ratio, 1.6);
+    }
+
+    #[test]
+    fn round_trip_window_sells_when_too_few_holders_remain() {
+        let mut quiet = bound(
+            |cfg| {
+                cfg.take_profit = 0.0;
+                cfg.max_hold_s = 0.0;
+                cfg.round_trip_window_s = 10.0;
+                cfg.min_round_trip_holders = 1;
+            },
+            "me",
+        );
+        arm(&mut quiet);
+        quiet.on_buy_fill(50e-9, T0 + 5_000);
+        assert_eq!(quiet.on_clock(T0 + 9_999, 50e-9), None);
+        assert_eq!(quiet.on_clock(T0 + 10_000, 50e-9), Some("SELL"));
+        assert_eq!(quiet.last_sell_reason(), "round_trip 0");
+
+        let mut one = bound(
+            |cfg| {
+                cfg.take_profit = 0.0;
+                cfg.max_hold_s = 0.0;
+                cfg.round_trip_window_s = 10.0;
+                cfg.min_round_trip_holders = 1;
+            },
+            "me",
+        );
+        arm(&mut one);
+        one.on_buy_fill(50e-9, T0 + 5_000);
+        let mut bought = print("BUY", 0.2, "holder-buy", T0 + 6_000);
+        bought.wallet = "holder".to_string();
+        bought.token_amount = 10.0;
+        assert_eq!(one.on_event(&bought), None);
+        let mut sold = print("SELL", 0.2, "holder-sell", T0 + 7_000);
+        sold.wallet = "holder".to_string();
+        sold.token_amount = 4.0;
+        assert_eq!(one.on_event(&sold), None);
+        assert_eq!(one.on_clock(T0 + 16_000, 50e-9), None);
+        assert_eq!(one.on_clock(T0 + 16_001, 50e-9), Some("SELL"));
+        assert_eq!(one.last_sell_reason(), "round_trip 0");
+
+        let mut crowded = bound(
+            |cfg| {
+                cfg.take_profit = 0.0;
+                cfg.max_hold_s = 0.0;
+                cfg.round_trip_window_s = 10.0;
+                cfg.max_round_trip_holders = 1;
+            },
+            "me",
+        );
+        arm(&mut crowded);
+        crowded.on_buy_fill(50e-9, T0 + 5_000);
+        let mut first = print("SELL", 0.2, "first", T0 + 11_000);
+        first.wallet = "holder".to_string();
+        first.token_amount = 1.0;
+        assert_eq!(crowded.on_event(&first), None);
+        let mut second = print("BUY", 0.2, "second", T0 + 12_000);
+        second.wallet = "holder".to_string();
+        second.token_amount = 1.0;
+        assert_eq!(crowded.on_event(&second), Some("SELL"));
+        assert_eq!(crowded.last_sell_reason(), "round_trip 1");
     }
 
     #[test]
