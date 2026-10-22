@@ -359,21 +359,26 @@ pub struct StrategyV081Config {
     pub hold_sell_s: f64,
     pub min_largest_sell_sol: f64,
     pub max_largest_sell_sol: f64,
+    pub round_trip_s: f64,
+    pub min_round_trip_holders: u32,
+    pub max_round_trip_holders: u32,
     pub target_sell_exit: bool,
     pub second_buy_exit: bool,
     pub first_cycle_only: bool,
     pub repeat_entries: bool,
+    pub max_trades_per_mint: u32,
     pub size_sol: f64,
 }
 
 impl StrategyV081Config {
-    /// Knobs from scalpingbot `config/strategy_v_081.json` (2026-10-22).
+    /// Knobs from scalpingbot `config/strategy_v_081.json` (2026-10-22 update).
     /// `buy_hit_count` of 0 is clock entry. Zero `min_entry_s`, `max_entry_s`,
     /// `min_mc_sol`, `max_mc_sol`, `min_largest_buy_sol`, `max_largest_buy_sol`,
     /// `min_price_ratio`, `max_price_ratio`, `hold_sell_s`, `min_largest_sell_sol`,
-    /// `max_largest_sell_sol`, and `max_hold_s` disable those bounds.
-    /// `min_mc_sol` is 0, so only the 80 SOL cap applies. `size_sol` matches
-    /// that config.
+    /// `max_largest_sell_sol`, `round_trip_s`, `min_round_trip_holders`,
+    /// `max_round_trip_holders`, `max_trades_per_mint`, and `max_hold_s` disable
+    /// those bounds. `hold_sell_s` is 0, so the stored largest-sell bounds are
+    /// off. `size_sol` matches that config.
     pub fn default_v081() -> Self {
         let mut cfg = Self {
             gate_wallet: "ardinRsN1mNYVeoJWTBsWeYeXvuR9UUDGMsCDKpb6AT".to_string(),
@@ -386,23 +391,34 @@ impl StrategyV081Config {
             buy_hit_min: 0.0,
             min_mc_sol: 0.0,
             max_mc_sol: 80.0,
-            min_largest_buy_sol: 2.0,
+            min_largest_buy_sol: 0.0,
             max_largest_buy_sol: 6.0,
             sell_hit_count: 3,
-            sell_hit_min: 4.0,
+            sell_hit_min: 5.0,
             take_profit: 0.4,
             max_hold_s: 30.0,
-            hold_sell_s: 8.0,
+            hold_sell_s: 0.0,
             min_largest_sell_sol: 2.0,
             max_largest_sell_sol: 5.0,
+            round_trip_s: 10.0,
+            min_round_trip_holders: 15,
+            max_round_trip_holders: 0,
             target_sell_exit: true,
             second_buy_exit: false,
-            first_cycle_only: true,
+            first_cycle_only: false,
             repeat_entries: true,
+            max_trades_per_mint: 1,
             size_sol: 0.3,
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
+        }
+        if cfg.round_trip_s <= 0.0
+            || (cfg.min_round_trip_holders == 0 && cfg.max_round_trip_holders == 0)
+        {
+            cfg.round_trip_s = 0.0;
+            cfg.min_round_trip_holders = 0;
+            cfg.max_round_trip_holders = 0;
         }
         cfg
     }

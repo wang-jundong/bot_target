@@ -152,6 +152,10 @@ async fn main() -> anyhow::Result<()> {
                     hold_sell_s = c.hold_sell_s,
                     min_largest_sell_sol = c.min_largest_sell_sol,
                     max_largest_sell_sol = c.max_largest_sell_sol,
+                    round_trip_s = c.round_trip_s,
+                    min_round_trip_holders = c.min_round_trip_holders,
+                    max_round_trip_holders = c.max_round_trip_holders,
+                    max_trades_per_mint = c.max_trades_per_mint,
                     repeat_entries = c.repeat_entries,
                     "[01 STARTUP] Strategy knobs"
                 );
