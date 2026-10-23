@@ -2,7 +2,7 @@
 //!
 //! Same flow as scalpingbot `strategy_v_071.py`, for
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
-//! Knobs from `config/strategy_v_071.json` (2026-10-17).
+//! Knobs from `config/strategy_v_071.json` (2026-10-23).
 //! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, or `max_hold_s`
 //! of 0 disables that bound. Max sell is 80% of the bag.
 //! One instance per mint.
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(loaded.min_entry_s, 1.5);
         assert_eq!(loaded.max_entry_s, 45.0);
         assert_eq!(loaded.min_mc_sol, 0.0);
-        assert_eq!(loaded.max_mc_sol, 60.0);
+        assert_eq!(loaded.max_mc_sol, 70.0);
         assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 8.0);
         assert_eq!(loaded.take_profit, 1.2);
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(engine.phase_name(), "seek_sell");
 
         let mut rich = print("BUY", 1.0, "rich", T0 + 2_000);
-        rich.price = 61e-9;
+        rich.price = 71e-9;
         assert_eq!(engine.on_event(&rich), None);
         assert_eq!(engine.phase_name(), "seek_sell");
 
