@@ -97,3 +97,34 @@ pub fn is_non_retryable_buy_error(message: &str, venue: &str) -> bool {
     (venue == "pump" && message.contains("\"Custom\":6002"))
         || (venue == "pumpswap" && message.contains("\"Custom\":6004"))
 }
+
+/// Pump `NotEnoughTokensToSell` (6023). The ATA balance is below the sell
+/// amount, so another identical submit only burns the priority fee.
+pub fn is_empty_sell_error(message: &str, venue: &str) -> bool {
+    venue == "pump" && (message.contains("\"Custom\":6023") || message.contains("Custom(6023)"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_empty_sell_error;
+
+    #[test]
+    fn pump_not_enough_tokens_is_an_empty_sell() {
+        assert!(is_empty_sell_error(
+            "transaction failed: InstructionError(3, Custom(6023))",
+            "pump"
+        ));
+        assert!(is_empty_sell_error(
+            r#"transaction failed: {"InstructionError":[3,{"Custom":6023}]}"#,
+            "pump"
+        ));
+        assert!(!is_empty_sell_error(
+            "transaction failed: InstructionError(3, Custom(6023))",
+            "pumpswap"
+        ));
+        assert!(!is_empty_sell_error(
+            "transaction failed: InstructionError(3, Custom(6002))",
+            "pump"
+        ));
+    }
+}

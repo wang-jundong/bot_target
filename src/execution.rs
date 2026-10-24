@@ -1,5 +1,7 @@
 use crate::events::mono_ms;
-use crate::helius::{HeliusSender, HeliusSenderUnavailable, is_non_retryable_buy_error};
+use crate::helius::{
+    HeliusSender, HeliusSenderUnavailable, is_empty_sell_error, is_non_retryable_buy_error,
+};
 use crate::journal::{ClosedTradePnlInput, PnlJournal, RecoveryJournal, create_pnl_record};
 use crate::state::{Lifecycle, TokenInner, is_holding};
 use crate::venues::Venues;
@@ -8,8 +10,10 @@ use crate::venues::trade::compile_trade;
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use serde_json::{Value, json};
+use solana_account_decoder_client_types::UiAccountData;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcSendTransactionConfig, RpcTransactionConfig};
+use solana_client::rpc_request::TokenAccountsFilter;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature};
@@ -210,15 +214,21 @@ impl LiveExecution {
         token: &Mutex<TokenInner>,
         reason: &str,
     ) -> Result<()> {
-        let amount = token.lock().await.actual_token_amount;
-        let Some(amount) = amount else {
-            let mut state = token.lock().await;
-            self.sell_failed(&mut state, reason, "position token amount is unknown")
-                .await;
-            return Ok(());
-        };
         let mut last_error = String::from("sell failed");
+        let mut stop_retry = false;
         for attempt in 1..=3 {
+            let amount = token.lock().await.actual_token_amount;
+            let Some(amount) = amount else {
+                let mut state = token.lock().await;
+                self.sell_failed(&mut state, reason, "position token amount is unknown")
+                    .await;
+                return Ok(());
+            };
+            if amount == 0 {
+                let mut state = token.lock().await;
+                self.close_empty_position(&mut state, reason, "position token amount is zero");
+                return Ok(());
+            }
             let prepared = {
                 let mut state = token.lock().await;
                 let slippage = state.sell_slippage_bps.unwrap_or(self.sell_slippage_bps);
@@ -334,12 +344,63 @@ impl LiveExecution {
                 }
                 Err(err) => {
                     last_error = err.to_string();
-                    token.lock().await.prepared_sell = None;
-                    tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
+                    let mut state = token.lock().await;
+                    state.prepared_sell = None;
+                    let venue = state.descriptor.venue.clone();
+                    let mint = state.descriptor.mint.clone();
+                    tracing::warn!(attempt, mint = %mint, error = %last_error, "[08 EXIT] Sell attempt failed");
+                    if !is_empty_sell_error(&last_error, &venue) {
+                        continue;
+                    }
+                    drop(state);
+                    match self.wallet_token_amount(&mint).await {
+                        Ok(0) => {
+                            let mut state = token.lock().await;
+                            self.close_empty_position(&mut state, reason, &last_error);
+                            return Ok(());
+                        }
+                        Ok(balance) => {
+                            let mut state = token.lock().await;
+                            let current = state.actual_token_amount.unwrap_or(0);
+                            if balance < current {
+                                tracing::warn!(
+                                    mint = %mint,
+                                    balance,
+                                    requested = current,
+                                    "[08 EXIT] Sell amount was above the wallet balance; retrying the on-chain amount"
+                                );
+                                state.actual_token_amount = Some(balance);
+                                continue;
+                            }
+                            self.close_empty_position(&mut state, reason, &last_error);
+                            return Ok(());
+                        }
+                        Err(balance_err) => {
+                            // Another identical sell would land and pay the priority fee again.
+                            tracing::error!(
+                                mint = %mint,
+                                error = %balance_err,
+                                "[08 EXIT] Could not read the token balance after NotEnoughTokensToSell; not resubmitting"
+                            );
+                            stop_retry = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
         let mut state = token.lock().await;
+        if stop_retry {
+            if matches!(
+                state.lifecycle,
+                Lifecycle::SellPrepared | Lifecycle::SellSent
+            ) {
+                let _ = state.transition(Lifecycle::PositionActiveConfirmed);
+            }
+            state.release_sell_send();
+            state.prepared_sell = None;
+            return Ok(());
+        }
         self.sell_failed(&mut state, reason, &last_error).await;
         Ok(())
     }
@@ -637,6 +698,69 @@ impl LiveExecution {
             "prices": state.prices,
         }));
         tracing::warn!(error, mint = %state.descriptor.mint, "[05 ENTRY] Buy failed; still watching this mint");
+    }
+
+    /// Pump already rejected the sell because the wallet does not hold that
+    /// amount. Closing here skips `on_sell_failed`, which would submit the
+    /// same transaction again and pay the priority fee each time.
+    fn close_empty_position(&self, state: &mut TokenInner, reason: &str, error: &str) {
+        let closed = self.record_value(
+            state,
+            "position_closed",
+            json!({ "reason": reason, "error": error, "flat": true }),
+        );
+        let mint = state.descriptor.mint.clone();
+        state.engine.on_sell_fill();
+        state.sell_after_fill = false;
+        state.clear_filled_position();
+        state.reset_buy_send_claim();
+        state.reset_sell_send_claim();
+        if !matches!(
+            state.lifecycle,
+            Lifecycle::SellPrepared | Lifecycle::SellSent
+        ) {
+            let _ = state.begin_sell_attempt();
+        }
+        if matches!(
+            state.lifecycle,
+            Lifecycle::SellPrepared | Lifecycle::SellSent
+        ) {
+            let _ = state.transition(Lifecycle::TrackingPool);
+        }
+        tracing::error!(
+            error,
+            reason,
+            mint = %mint,
+            "[08 EXIT] Token balance cannot cover the sell; stopped sell retries"
+        );
+        tracing::info!(value = %closed, "{}", record_message("position_closed"));
+        let journal = Arc::clone(&self.journal);
+        tokio::spawn(async move {
+            journal.record_critical(closed).await;
+        });
+    }
+
+    async fn wallet_token_amount(&self, mint: &str) -> Result<u64> {
+        let mint: Pubkey = mint.parse()?;
+        let accounts = self
+            .rpc
+            .get_token_accounts_by_owner(&self.wallet.pubkey(), TokenAccountsFilter::Mint(mint))
+            .await?;
+        let mut total = 0u64;
+        for keyed in accounts {
+            if let UiAccountData::Json(parsed) = keyed.account.data {
+                let amount = parsed
+                    .parsed
+                    .get("info")
+                    .and_then(|info| info.get("tokenAmount"))
+                    .and_then(|amount| amount.get("amount"))
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                total = total.saturating_add(amount);
+            }
+        }
+        Ok(total)
     }
 
     async fn sell_failed(&self, state: &mut TokenInner, reason: &str, error: &str) {
