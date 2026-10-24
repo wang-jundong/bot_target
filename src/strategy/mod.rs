@@ -8,6 +8,7 @@ pub mod v061;
 pub mod v071;
 pub mod v081;
 pub mod v101;
+pub mod v121;
 
 use crate::events::{PoolTradeEvent, Side, lamports_to_sol, to_strategy_price};
 use common::MarketEvent;

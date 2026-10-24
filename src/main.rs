@@ -193,6 +193,35 @@ async fn main() -> anyhow::Result<()> {
                     "[01 STARTUP] Strategy knobs"
                 );
             }
+            bot_target::config::StrategyName::V121 => {
+                let c = &config.strategy_v121;
+                tracing::info!(
+                    strategy = plan.name.as_str(),
+                    target_wallet = %plan.target_wallet,
+                    size_sol = c.size_sol,
+                    dust_sol = c.dust_sol,
+                    min_entry_s = c.min_entry_s,
+                    max_entry_s = c.max_entry_s,
+                    buy_hit_count = c.buy_hit_count,
+                    buy_hit_min = c.buy_hit_min,
+                    min_mc_sol = c.min_mc_sol,
+                    max_mc_sol = c.max_mc_sol,
+                    min_largest_buy_sol = c.min_largest_buy_sol,
+                    max_largest_buy_sol = c.max_largest_buy_sol,
+                    min_price_ratio = c.min_price_ratio,
+                    max_price_ratio = c.max_price_ratio,
+                    min_buy_round_trip_holders = c.min_buy_round_trip_holders,
+                    max_buy_round_trip_holders = c.max_buy_round_trip_holders,
+                    sell_hit_count = c.sell_hit_count,
+                    sell_hit_min = c.sell_hit_min,
+                    take_profit = c.take_profit,
+                    max_hold_s = c.max_hold_s,
+                    target_sell_exit = c.target_sell_exit,
+                    second_buy_exit = c.second_buy_exit,
+                    repeat_entries = c.repeat_entries,
+                    "[01 STARTUP] Strategy knobs"
+                );
+            }
         }
     }
 
