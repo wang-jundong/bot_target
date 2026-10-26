@@ -2,8 +2,8 @@ use super::ids::{
     HELIUS_TIP_ACCOUNTS, PUMP_AMM_PROGRAM, PUMP_BUYBACK_FEE_RECIPIENTS, PUMP_FEE_PROGRAM,
     PUMP_PROGRAM, amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume,
     amm_user_volume, ata, bonding_curve_pda, bonding_curve_v2_pda, coin_creator_vault_authority,
-    creator_vault_pda, is_pump_fee_recipient, pool_v2_pda, pump_event_authority, pump_fee_config,
-    pump_fee_recipients, pump_global, pump_global_volume, pump_user_volume,
+    creator_vault_pda, is_pump_fee_recipient, pool_v2_pda, pump_event_authority,
+    pump_fee_config, pump_fee_recipients, pump_global, pump_global_volume, pump_user_volume,
 };
 use super::quote::{
     quote_amm_buy, quote_amm_sell, quote_buy_tokens, quote_sell_sol, slippage_down,
@@ -11,15 +11,15 @@ use super::quote::{
 use crate::events::{PumpCurveSnapshot, PumpSwapSnapshot};
 use crate::state::PreparedTrade;
 use anyhow::{Result, bail};
-use solana_sdk::compute_budget::ComputeBudgetInstruction;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::hash::Hash;
 use solana_sdk::instruction::{AccountMeta, Instruction};
-use solana_sdk::message::{VersionedMessage, v0};
+use solana_sdk::message::{VersionedMessage, v0, v1};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
-#[allow(deprecated)]
-use solana_sdk::system_instruction;
 use solana_sdk::transaction::VersionedTransaction;
+use solana_system_interface::instruction as system_instruction;
+use solana_system_interface::program as system_program;
 
 const BUY_EXACT_SOL_IN: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
 const SELL: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
@@ -75,7 +75,7 @@ pub fn create_ata_idempotent(
             meta(address, true, false),
             meta(*owner, false, false),
             meta(*mint, false, false),
-            meta(solana_sdk::system_program::id(), false, false),
+            meta(system_program::id(), false, false),
             meta(*token_program, false, false),
         ],
         data: vec![1],
@@ -117,7 +117,7 @@ pub fn build_pump_buy(
             meta(ata(&curve_pda, mint, token_program), true, false),
             meta(associated_user, true, false),
             meta(*owner, true, true),
-            meta(solana_sdk::system_program::id(), false, false),
+            meta(system_program::id(), false, false),
             meta(*token_program, false, false),
             meta(creator_vault_pda(&creator), true, false),
             meta(pump_event_authority(), false, false),
@@ -171,7 +171,7 @@ pub fn build_pump_sell(
         meta(ata(&curve_pda, mint, token_program), true, false),
         meta(ata(owner, mint, token_program), true, false),
         meta(*owner, true, true),
-        meta(solana_sdk::system_program::id(), false, false),
+        meta(system_program::id(), false, false),
         meta(creator_vault_pda(&creator), true, false),
         meta(*token_program, false, false),
         meta(pump_event_authority(), false, false),
@@ -394,7 +394,7 @@ fn amm_accounts(
         ),
         meta(*base_program, false, false),
         meta(*quote_program, false, false),
-        meta(solana_sdk::system_program::id(), false, false),
+        meta(system_program::id(), false, false),
         meta(*super::ids::ATA_PROGRAM, false, false),
         meta(amm_event_authority(), false, false),
         meta(*PUMP_AMM_PROGRAM, false, false),
@@ -448,7 +448,19 @@ fn prepared(
     }
 }
 
+/// v0 charged this when `SetLoadedAccountsDataSizeLimit` was omitted.
+/// v1 treats an unset limit as zero and the transaction fails.
+const LOADED_ACCOUNTS_DATA_SIZE_LIMIT: u32 = 64 * 1024 * 1024;
+
 pub fn compile_trade(
+    prepared: &PreparedTrade,
+    blockhash: Hash,
+    keypair: &Keypair,
+) -> Result<VersionedTransaction> {
+    compile_v0(prepared, blockhash, keypair)
+}
+
+fn compile_v0(
     prepared: &PreparedTrade,
     blockhash: Hash,
     keypair: &Keypair,
@@ -470,6 +482,38 @@ pub fn compile_trade(
         VersionedMessage::V0(message),
         &[keypair],
     )?)
+}
+
+#[allow(dead_code)]
+fn compile_v1(
+    prepared: &PreparedTrade,
+    blockhash: Hash,
+    keypair: &Keypair,
+) -> Result<VersionedTransaction> {
+    let mut instructions = vec![system_instruction::transfer(
+        &prepared.payer,
+        &pick(&HELIUS_TIP_ACCOUNTS),
+        prepared.tip_lamports,
+    )];
+    instructions.extend(prepared.instructions.iter().cloned());
+    // v1 stores the budget in the message config. Priority fee is a total in
+    // lamports, not micro-lamports per compute unit.
+    let config = v1::TransactionConfig::empty()
+        .with_compute_unit_limit(prepared.compute_unit_limit)
+        .with_loaded_accounts_data_size_limit(LOADED_ACCOUNTS_DATA_SIZE_LIMIT)
+        .with_priority_fee(prepared.priority_fee_lamports);
+    let message =
+        v1::Message::try_compile_with_config(&prepared.payer, &instructions, blockhash, config)?;
+    Ok(VersionedTransaction::try_new(
+        VersionedMessage::V1(message),
+        &[keypair],
+    )?)
+}
+
+/// Wire bytes for `sendTransaction` with `encoding: base64`.
+/// v1 is not bincode-compatible; the envelope starts with `0x81` and signatures sit at the tail.
+pub fn transaction_wire_bytes(transaction: &VersionedTransaction) -> Result<Vec<u8>> {
+    wincode::serialize(transaction).map_err(|err| anyhow::anyhow!("serialize transaction: {err}"))
 }
 
 pub fn burn_instruction(
@@ -525,6 +569,7 @@ pub fn harvest_withheld_instruction(
 mod tests {
     use super::*;
     use crate::venues::ids::PUMP_FEE_RECIPIENTS;
+    use solana_sdk::signer::Signer;
 
     fn sample_curve(fee_recipient: Option<&str>) -> PumpCurveSnapshot {
         PumpCurveSnapshot {
@@ -533,7 +578,7 @@ mod tests {
             real_token_reserves: 800_000_000_000_000,
             creator: Pubkey::new_unique().to_string(),
             mayhem_mode: false,
-            quote_mint: Some(solana_sdk::system_program::id().to_string()),
+            quote_mint: Some(system_program::id().to_string()),
             protocol_fee_bps: 100,
             creator_fee_bps: 30,
             fee_recipient: fee_recipient.map(str::to_string),
@@ -546,7 +591,7 @@ mod tests {
         let owner = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
         // This is the on-chain failure mode: quote mint / System Program leaked into fee_recipient.
-        let curve = sample_curve(Some(&solana_sdk::system_program::id().to_string()));
+        let curve = sample_curve(Some(&system_program::id().to_string()));
         let prepared = build_pump_sell(
             &owner,
             &mint,
@@ -565,12 +610,82 @@ mod tests {
             .find(|ix| ix.program_id == *PUMP_PROGRAM)
             .unwrap();
         let fee_recipient = sell.accounts[1].pubkey;
-        assert_ne!(fee_recipient, solana_sdk::system_program::id());
+        assert_ne!(fee_recipient, system_program::id());
         assert!(
             PUMP_FEE_RECIPIENTS
                 .iter()
                 .any(|allowed| *allowed == fee_recipient)
         );
+    }
+
+    #[test]
+    fn compiles_a_v1_transaction() {
+        let payer = Keypair::new();
+        let prepared = PreparedTrade {
+            instructions: vec![system_instruction::transfer(
+                &payer.pubkey(),
+                &Pubkey::new_unique(),
+                1,
+            )],
+            payer: payer.pubkey(),
+            compute_unit_limit: 150_000,
+            priority_fee_lamports: 10_000,
+            tip_lamports: 5_000,
+        };
+        let tx = compile_v1(&prepared, Hash::default(), &payer).unwrap();
+        let VersionedMessage::V1(message) = &tx.message else {
+            panic!("expected a v1 message");
+        };
+        assert_eq!(message.config.compute_unit_limit, Some(150_000));
+        assert_eq!(message.config.priority_fee, Some(10_000));
+        assert_eq!(
+            message.config.loaded_accounts_data_size_limit,
+            Some(LOADED_ACCOUNTS_DATA_SIZE_LIMIT)
+        );
+        assert!(message.instructions.iter().all(|ix| {
+            message.account_keys[ix.program_id_index as usize] == system_program::id()
+        }));
+        let raw = transaction_wire_bytes(&tx).unwrap();
+        assert_eq!(raw[0], v1::V1_PREFIX);
+    }
+
+    #[test]
+    fn every_pair_compiles_v0() {
+        let owner = Keypair::new();
+        let mint = Pubkey::new_unique();
+        let sol = sample_curve(None);
+        let prepared = build_pump_sell(
+            &owner.pubkey(),
+            &mint,
+            &crate::venues::ids::TOKEN_PROGRAM,
+            1_000_000,
+            500,
+            &sol,
+            150_000,
+            10_000,
+            5_000,
+        )
+        .unwrap();
+        let tx = compile_trade(&prepared, Hash::default(), &owner).unwrap();
+        assert!(matches!(tx.message, VersionedMessage::V0(_)));
+        assert_ne!(transaction_wire_bytes(&tx).unwrap()[0], v1::V1_PREFIX);
+
+        let mut other = sample_curve(None);
+        other.quote_mint = Some(Pubkey::new_unique().to_string());
+        let prepared = build_pump_sell(
+            &owner.pubkey(),
+            &mint,
+            &crate::venues::ids::TOKEN_PROGRAM,
+            1_000_000,
+            500,
+            &other,
+            150_000,
+            10_000,
+            5_000,
+        )
+        .unwrap();
+        let tx = compile_trade(&prepared, Hash::default(), &owner).unwrap();
+        assert!(matches!(tx.message, VersionedMessage::V0(_)));
     }
 
     #[test]

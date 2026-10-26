@@ -8,6 +8,7 @@ use crate::events::{
     PumpSwapSnapshot, Side, TokenBalanceInfo, mono_ms,
 };
 use solana_sdk::pubkey::Pubkey;
+use solana_system_interface::program as system_program;
 use std::collections::HashSet;
 
 const TRADE_EVENT: [u8; 8] = [189, 219, 127, 211, 78, 230, 97, 238];
@@ -436,7 +437,7 @@ fn buyback_recipient(
         ata(protocol_fee_recipient, &quote_mint, &quote_program).to_string(),
         vaults.0.program_id.clone(),
         vaults.1.program_id.clone(),
-        solana_sdk::system_program::id().to_string(),
+        system_program::id().to_string(),
         super::ids::ATA_PROGRAM.to_string(),
         amm_event_authority().to_string(),
         PUMP_AMM_PROGRAM.to_string(),

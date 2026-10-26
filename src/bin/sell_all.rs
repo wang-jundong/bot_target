@@ -6,7 +6,9 @@ use bot_target::venues::ids::{
     PUMP_BUYBACK_FEE_RECIPIENTS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT, amm_global_config,
     bonding_curve_pda, canonical_pool_pda, parse_amm_global_config, parse_amm_pool,
 };
-use bot_target::venues::trade::{build_amm_sell, build_pump_sell, compile_trade};
+use bot_target::venues::trade::{
+    build_amm_sell, build_pump_sell, compile_trade, transaction_wire_bytes,
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -132,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let blockhash = rpc.get_latest_blockhash().await?;
                 let tx = compile_trade(&prepared, blockhash, &plan.keypair)?;
-                let raw = bincode::serialize(&tx)?;
+                let raw = transaction_wire_bytes(&tx)?;
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
                 let signature = match sender.send(&encoded, mono_ms()).await {
                     Ok((signature, _)) => signature,

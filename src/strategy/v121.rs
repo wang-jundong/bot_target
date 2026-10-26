@@ -502,7 +502,11 @@ impl StrategyV121Engine {
     fn arm_buy(&mut self, px: f64, age: f64, total: f64, why: &str) {
         let mcap = if px > 0.0 { px * 1_000_000_000.0 } else { 0.0 };
         let ratio = self.price_ratio(px);
-        let end_ret = if ratio > 0.0 { round(ratio - 1.0, 4) } else { 0.0 };
+        let end_ret = if ratio > 0.0 {
+            round(ratio - 1.0, 4)
+        } else {
+            0.0
+        };
         self.st.hit_sol = total;
         self.st.phase = PHASE_PENDING;
         self.st.why = why.to_string();
@@ -975,8 +979,14 @@ mod tests {
         let mut over_mc = print("SELL", 0.5, "mc", T0 + 8_000);
         over_mc.price = 80.001e-9;
         over_mc.slot = 93;
-        assert_eq!(wide.on_event(&at_slot(print("SELL", 0.5, "a", T0 + 8_000), 90)), None);
-        assert_eq!(wide.on_event(&at_slot(print("SELL", 0.5, "b", T0 + 8_000), 91)), None);
+        assert_eq!(
+            wide.on_event(&at_slot(print("SELL", 0.5, "a", T0 + 8_000), 90)),
+            None
+        );
+        assert_eq!(
+            wide.on_event(&at_slot(print("SELL", 0.5, "b", T0 + 8_000), 91)),
+            None
+        );
         assert_eq!(wide.on_event(&over_mc), None);
 
         let mut cap = bound(|_| {}, "");
@@ -988,8 +998,14 @@ mod tests {
         let mut at_cap = print("SELL", 0.5, "cap", T0 + 8_000);
         at_cap.price = 80e-9;
         at_cap.slot = 93;
-        assert_eq!(cap.on_event(&at_slot(print("SELL", 0.5, "a", T0 + 8_000), 90)), None);
-        assert_eq!(cap.on_event(&at_slot(print("SELL", 0.5, "b", T0 + 8_000), 91)), None);
+        assert_eq!(
+            cap.on_event(&at_slot(print("SELL", 0.5, "a", T0 + 8_000), 90)),
+            None
+        );
+        assert_eq!(
+            cap.on_event(&at_slot(print("SELL", 0.5, "b", T0 + 8_000), 91)),
+            None
+        );
         assert_eq!(cap.on_event(&at_cap), Some("BUY"));
         assert_eq!(cap.last_buy_diag().mcap, 80.0);
         assert_eq!(cap.last_buy_diag().price_ratio, 2.0);
@@ -1003,8 +1019,14 @@ mod tests {
         let mut over_ratio = print("SELL", 0.5, "ratio", T0 + 8_000);
         over_ratio.price = PX0 * 2.01;
         over_ratio.slot = 93;
-        assert_eq!(ratio.on_event(&at_slot(print("SELL", 0.5, "a", T0 + 8_000), 90)), None);
-        assert_eq!(ratio.on_event(&at_slot(print("SELL", 0.5, "b", T0 + 8_000), 91)), None);
+        assert_eq!(
+            ratio.on_event(&at_slot(print("SELL", 0.5, "a", T0 + 8_000), 90)),
+            None
+        );
+        assert_eq!(
+            ratio.on_event(&at_slot(print("SELL", 0.5, "b", T0 + 8_000), 91)),
+            None
+        );
         assert_eq!(ratio.on_event(&over_ratio), None);
         assert_eq!(ratio.phase_name(), "seek_sell");
     }
@@ -1079,8 +1101,14 @@ mod tests {
     fn sell_window_slides_and_dust_does_not_break_it() {
         let mut engine = bound(loose, "");
         assert_eq!(engine.on_event(&print("SELL", 0.5, "a", T0 + 1_000)), None);
-        assert_eq!(engine.on_event(&print("SELL", 0.2, "dust", T0 + 1_100)), None);
-        assert_eq!(engine.on_event(&print("BUY", 0.5, "break", T0 + 1_200)), None);
+        assert_eq!(
+            engine.on_event(&print("SELL", 0.2, "dust", T0 + 1_100)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&print("BUY", 0.5, "break", T0 + 1_200)),
+            None
+        );
         assert_eq!(engine.on_event(&print("SELL", 0.4, "b", T0 + 1_300)), None);
         assert_eq!(engine.on_event(&print("SELL", 0.4, "c", T0 + 1_400)), None);
         assert_eq!(engine.on_event(&print("SELL", 0.4, "d", T0 + 1_500)), None);
@@ -1111,7 +1139,10 @@ mod tests {
             },
             "",
         );
-        assert_eq!(clock.on_event(&print("SELL", 0.05, "early", T0 + 6_999)), None);
+        assert_eq!(
+            clock.on_event(&print("SELL", 0.05, "early", T0 + 6_999)),
+            None
+        );
         assert_eq!(
             clock.on_event(&print("BUY", 9.0, "signal", T0 + 7_000)),
             Some("BUY")
@@ -1144,7 +1175,10 @@ mod tests {
         let mut tp = bound(loose, "");
         assert_eq!(tp.on_event(&print("SELL", 0.5, "a", T0 + 1_000)), None);
         assert_eq!(tp.on_event(&print("SELL", 0.5, "b", T0 + 1_000)), None);
-        assert_eq!(tp.on_event(&print("SELL", 0.5, "c", T0 + 1_000)), Some("BUY"));
+        assert_eq!(
+            tp.on_event(&print("SELL", 0.5, "c", T0 + 1_000)),
+            Some("BUY")
+        );
         tp.on_buy_fill(fill, T0 + 2_000);
         let mut under = print("SELL", 0.05, "under", T0 + 3_000);
         under.price = fill * 1.14;
@@ -1160,7 +1194,10 @@ mod tests {
         let mut held = bound(loose, "");
         assert_eq!(held.on_event(&print("SELL", 0.5, "a", T0 + 1_000)), None);
         assert_eq!(held.on_event(&print("SELL", 0.5, "b", T0 + 1_000)), None);
-        assert_eq!(held.on_event(&print("SELL", 0.5, "c", T0 + 1_000)), Some("BUY"));
+        assert_eq!(
+            held.on_event(&print("SELL", 0.5, "c", T0 + 1_000)),
+            Some("BUY")
+        );
         held.on_buy_fill(fill, T0 + 2_000);
         assert_eq!(held.on_clock(T0 + 2_000 + 29_999, fill), None);
         assert_eq!(held.on_clock(T0 + 2_000 + 30_000, fill), Some("SELL"));
@@ -1188,14 +1225,8 @@ mod tests {
         assert_eq!(engine.on_event(&again), None);
         assert_eq!(engine.phase_name(), "seek_sell");
         assert!(engine.needs_pool_tape());
-        assert_eq!(
-            engine.on_event(&print("SELL", 0.5, "a", T0 + 31_000)),
-            None
-        );
-        assert_eq!(
-            engine.on_event(&print("SELL", 0.5, "b", T0 + 31_000)),
-            None
-        );
+        assert_eq!(engine.on_event(&print("SELL", 0.5, "a", T0 + 31_000)), None);
+        assert_eq!(engine.on_event(&print("SELL", 0.5, "b", T0 + 31_000)), None);
         assert_eq!(
             engine.on_event(&print("SELL", 0.5, "c", T0 + 31_000)),
             Some("BUY")
@@ -1241,14 +1272,8 @@ mod tests {
         assert_eq!(engine.on_event(&took), Some("SELL"));
         engine.on_sell_fill();
         assert_eq!(engine.phase_name(), "seek_sell");
-        assert_eq!(
-            engine.on_event(&print("SELL", 0.5, "d", T0 + 4_000)),
-            None
-        );
-        assert_eq!(
-            engine.on_event(&print("SELL", 0.5, "e", T0 + 4_000)),
-            None
-        );
+        assert_eq!(engine.on_event(&print("SELL", 0.5, "d", T0 + 4_000)), None);
+        assert_eq!(engine.on_event(&print("SELL", 0.5, "e", T0 + 4_000)), None);
         assert_eq!(
             engine.on_event(&print("SELL", 0.5, "f", T0 + 4_000)),
             Some("BUY")

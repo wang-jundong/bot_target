@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::config::StrategyV081Config;
 use crate::strategy::common::{
-    ChainCursor, MarketEvent, MAX_SELL_FRAC, SELL_RETRY_MS, cursor_of, is_max_sell,
+    ChainCursor, MAX_SELL_FRAC, MarketEvent, SELL_RETRY_MS, cursor_of, is_max_sell,
     is_strictly_after, round,
 };
 

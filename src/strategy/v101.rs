@@ -429,7 +429,11 @@ impl StrategyV101Engine {
     fn arm_buy(&mut self, px: f64, age: f64, total: f64, why: &str) {
         let mcap = if px > 0.0 { px * 1_000_000_000.0 } else { 0.0 };
         let ratio = self.price_ratio(px);
-        let end_ret = if ratio > 0.0 { round(ratio - 1.0, 4) } else { 0.0 };
+        let end_ret = if ratio > 0.0 {
+            round(ratio - 1.0, 4)
+        } else {
+            0.0
+        };
         self.st.hit_sol = total;
         self.st.phase = PHASE_PENDING;
         self.st.why = why.to_string();
@@ -839,7 +843,10 @@ mod tests {
     #[test]
     fn largest_buy_above_eight_sol_blocks_the_clock() {
         let mut capped = bound(|_| {}, "");
-        assert_eq!(capped.on_event(&print("BUY", 8.0, "at-max", T0 + 1_000)), None);
+        assert_eq!(
+            capped.on_event(&print("BUY", 8.0, "at-max", T0 + 1_000)),
+            None
+        );
         assert_eq!(
             capped.on_event(&print("SELL", 0.05, "ok", T0 + 2_000)),
             Some("BUY")
@@ -847,7 +854,10 @@ mod tests {
         assert_eq!(capped.last_buy_diag().largest_buy_sol, 8.0);
 
         let mut wide = bound(|_| {}, "");
-        assert_eq!(wide.on_event(&print("BUY", 8.01, "wider", T0 + 1_000)), None);
+        assert_eq!(
+            wide.on_event(&print("BUY", 8.01, "wider", T0 + 1_000)),
+            None
+        );
         assert_eq!(
             wide.on_event(&print("SELL", 0.05, "blocked", T0 + 2_000)),
             None
@@ -855,7 +865,10 @@ mod tests {
         assert_eq!(wide.phase_name(), "seek_sell");
 
         let mut signal = bound(|_| {}, "");
-        assert_eq!(signal.on_event(&print("BUY", 3.0, "prior", T0 + 1_000)), None);
+        assert_eq!(
+            signal.on_event(&print("BUY", 3.0, "prior", T0 + 1_000)),
+            None
+        );
         assert_eq!(
             signal.on_event(&print("BUY", 12.0, "signal-buy", T0 + 2_000)),
             Some("BUY")

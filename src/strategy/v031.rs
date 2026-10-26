@@ -426,7 +426,9 @@ impl StrategyV031Engine {
             return;
         }
         if side == SIDE_SELL && sol > 0.0 && tokens > 0.0 {
-            self.st.rt_sell_ms.insert(wallet.to_string(), self.st.now_ms);
+            self.st
+                .rt_sell_ms
+                .insert(wallet.to_string(), self.st.now_ms);
         }
     }
 
@@ -828,7 +830,10 @@ mod tests {
         assert_eq!(equal.last_buy_diag().largest_buy_sol, 5.0);
 
         let mut dusty = bound(|cfg| cfg.min_largest_buy_sol = 0.05, "");
-        assert_eq!(dusty.on_event(&print("BUY", 0.05, "dust", T0 + 1_000)), None);
+        assert_eq!(
+            dusty.on_event(&print("BUY", 0.05, "dust", T0 + 1_000)),
+            None
+        );
         assert_eq!(sells(&mut dusty, "dust-ok", T0 + 5_000, 0.3), Some("BUY"));
         assert_eq!(dusty.last_buy_diag().largest_buy_sol, 0.05);
 

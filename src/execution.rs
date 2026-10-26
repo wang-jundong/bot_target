@@ -6,7 +6,7 @@ use crate::journal::{ClosedTradePnlInput, PnlJournal, RecoveryJournal, create_pn
 use crate::state::{Lifecycle, TokenInner, is_holding};
 use crate::venues::Venues;
 use crate::venues::decoder::fill_from_logs;
-use crate::venues::trade::compile_trade;
+use crate::venues::trade::{compile_trade, transaction_wire_bytes};
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use serde_json::{Value, json};
@@ -14,7 +14,7 @@ use solana_account_decoder_client_types::UiAccountData;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcSendTransactionConfig, RpcTransactionConfig};
 use solana_client::rpc_request::TokenAccountsFilter;
-use solana_sdk::commitment_config::CommitmentConfig;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature};
 use solana_sdk::signer::Signer;
@@ -416,7 +416,7 @@ impl LiveExecution {
     ) -> Result<(String, u64, u64, f64)> {
         let blockhash = self.blockhashes.get().await?;
         let tx = compile_trade(prepared, blockhash, &self.wallet)?;
-        let raw = bincode::serialize(&tx)?;
+        let raw = transaction_wire_bytes(&tx)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
         let (signature, fallback) = match self.submit(&encoded, &tx).await {
             Ok(pair) => pair,
@@ -588,7 +588,7 @@ impl LiveExecution {
                         RpcTransactionConfig {
                             encoding: Some(UiTransactionEncoding::Json),
                             commitment: Some(CommitmentConfig::confirmed()),
-                            max_supported_transaction_version: Some(0),
+                            max_supported_transaction_version: Some(1),
                         },
                     );
                     tokio::pin!(fetch);
@@ -644,7 +644,7 @@ impl LiveExecution {
                 RpcTransactionConfig {
                     encoding: Some(UiTransactionEncoding::Json),
                     commitment: Some(CommitmentConfig::confirmed()),
-                    max_supported_transaction_version: Some(0),
+                    max_supported_transaction_version: Some(1),
                 },
             )
             .await?;

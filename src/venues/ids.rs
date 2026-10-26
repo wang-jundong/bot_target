@@ -1,4 +1,5 @@
 use solana_sdk::pubkey::Pubkey;
+use solana_system_interface::program as system_program;
 use std::sync::LazyLock;
 
 pub static PUMP_PROGRAM: LazyLock<Pubkey> =
@@ -21,9 +22,7 @@ pub static WSOL_MINT: LazyLock<Pubkey> =
 pub fn is_sol_quote(quote_mint: Option<&str>) -> bool {
     match quote_mint.map(str::trim).filter(|q| !q.is_empty()) {
         None => true,
-        Some(quote) => {
-            quote == WSOL_MINT.to_string() || quote == solana_sdk::system_program::id().to_string()
-        }
+        Some(quote) => quote == WSOL_MINT.to_string() || quote == system_program::id().to_string(),
     }
 }
 
