@@ -2,8 +2,8 @@ use super::ids::{
     HELIUS_TIP_ACCOUNTS, PUMP_AMM_PROGRAM, PUMP_BUYBACK_FEE_RECIPIENTS, PUMP_FEE_PROGRAM,
     PUMP_PROGRAM, amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume,
     amm_user_volume, ata, bonding_curve_pda, bonding_curve_v2_pda, coin_creator_vault_authority,
-    creator_vault_pda, is_pump_fee_recipient, pool_v2_pda, pump_event_authority,
-    pump_fee_config, pump_fee_recipients, pump_global, pump_global_volume, pump_user_volume,
+    creator_vault_pda, is_pump_fee_recipient, pool_v2_pda, pump_event_authority, pump_fee_config,
+    pump_fee_recipients, pump_global, pump_global_volume, pump_user_volume,
 };
 use super::quote::{
     quote_amm_buy, quote_amm_sell, quote_buy_tokens, quote_sell_sol, slippage_down,

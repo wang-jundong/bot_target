@@ -2,7 +2,7 @@
 //!
 //! Same flow as scalpingbot `strategy_v_071.py`, for
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
-//! Knobs from `config/strategy_v_071.json` (2026-10-23).
+//! Knobs from `config/strategy_v_071.json` (2026-10-26).
 //! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, or `max_hold_s`
 //! of 0 disables that bound. Max sell is 80% of the bag.
 //! One instance per mint.
@@ -607,7 +607,7 @@ mod tests {
 
     fn arm(engine: &mut StrategyV071Engine) {
         assert_eq!(
-            engine.on_event(&print("BUY", 0.1, "arm", T0 + 2_000)),
+            engine.on_event(&print("BUY", 0.1, "arm", T0 + 3_000)),
             Some("BUY")
         );
     }
@@ -635,8 +635,8 @@ mod tests {
             "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA"
         );
         assert_eq!(loaded.dust_sol, 0.8);
-        assert_eq!(loaded.min_entry_s, 1.5);
-        assert_eq!(loaded.max_entry_s, 45.0);
+        assert_eq!(loaded.min_entry_s, 3.0);
+        assert_eq!(loaded.max_entry_s, 90.0);
         assert_eq!(loaded.min_mc_sol, 0.0);
         assert_eq!(loaded.max_mc_sol, 70.0);
         assert_eq!(loaded.sell_hit_count, 5);
@@ -656,28 +656,28 @@ mod tests {
         assert_eq!(engine.phase_name(), "seek_sell");
         assert!(engine.needs_pool_tape());
         assert_eq!(
-            engine.on_event(&print("SELL", 0.1, "early", T0 + 1_499)),
+            engine.on_event(&print("SELL", 0.1, "early", T0 + 2_999)),
             None
         );
         assert_eq!(engine.phase_name(), "seek_sell");
 
-        let mut rich = print("BUY", 1.0, "rich", T0 + 2_000);
+        let mut rich = print("BUY", 1.0, "rich", T0 + 3_000);
         rich.price = 71e-9;
         assert_eq!(engine.on_event(&rich), None);
         assert_eq!(engine.phase_name(), "seek_sell");
 
-        let mut cheap = print("BUY", 1.0, "cheap", T0 + 3_000);
+        let mut cheap = print("BUY", 1.0, "cheap", T0 + 4_000);
         cheap.price = 24e-9;
         assert_eq!(engine.on_event(&cheap), Some("BUY"));
         assert_eq!(engine.phase_name(), "pending");
         assert_eq!(engine.last_buy_reason(), "clock");
-        assert_eq!(engine.last_buy_diag().wall_s, 3.0);
+        assert_eq!(engine.last_buy_diag().wall_s, 4.0);
         assert_eq!(engine.last_buy_diag().mcap, 24.0);
         assert_eq!(engine.last_buy_diag().end_ret, -0.52);
         assert_eq!(engine.last_buy_diag().buy_hit_sol, 0.0);
 
         let mut floored = bound(|cfg| cfg.min_mc_sol = 25.0, "");
-        let mut under = print("BUY", 1.0, "under-floor", T0 + 2_000);
+        let mut under = print("BUY", 1.0, "under-floor", T0 + 3_000);
         under.price = 24e-9;
         assert_eq!(floored.on_event(&under), None);
         assert_eq!(
@@ -691,19 +691,19 @@ mod tests {
     fn clock_edges_are_inclusive_and_late_print_expires() {
         let mut early_edge = bound(|_| {}, "");
         assert_eq!(
-            early_edge.on_event(&print("BUY", 0.1, "edge", T0 + 1_500)),
+            early_edge.on_event(&print("BUY", 0.1, "edge", T0 + 3_000)),
             Some("BUY")
         );
 
         let mut late_edge = bound(|_| {}, "");
         assert_eq!(
-            late_edge.on_event(&print("BUY", 0.1, "late-edge", T0 + 45_000)),
+            late_edge.on_event(&print("BUY", 0.1, "late-edge", T0 + 90_000)),
             Some("BUY")
         );
 
         let mut expired = bound(|_| {}, "");
         assert_eq!(
-            expired.on_event(&print("BUY", 0.1, "late", T0 + 45_001)),
+            expired.on_event(&print("BUY", 0.1, "late", T0 + 90_001)),
             None
         );
         assert_eq!(expired.phase_name(), "wait");
@@ -846,7 +846,7 @@ mod tests {
         );
         assert_eq!(engine.phase_name(), "seek_sell");
         assert_eq!(
-            engine.on_event(&print("BUY", 0.1, "again", T0 + 9_000)),
+            engine.on_event(&print("BUY", 0.1, "again", T0 + 10_000)),
             Some("BUY")
         );
     }
@@ -883,7 +883,7 @@ mod tests {
         let mut late = bound(|_| {}, "");
         arm(&mut late);
         late.on_buy_fill(50e-9, T0 + 2_000);
-        let mut late_tp = print("SELL", 0.05, "late-tp", T0 + 46_000);
+        let mut late_tp = print("SELL", 0.05, "late-tp", T0 + 90_001);
         late_tp.price = 50e-9 * 2.2;
         assert_eq!(late.on_event(&late_tp), Some("SELL"));
         late.on_sell_fill();

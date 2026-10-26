@@ -45,6 +45,8 @@ pub const STRATEGY_V_101_PRIVATE_KEY_ENCRYPTED: &str = "";
 pub const STRATEGY_V_101_PRIVATE_KEY_BASE58: &str = "";
 pub const STRATEGY_V_121_PRIVATE_KEY_ENCRYPTED: &str = "";
 pub const STRATEGY_V_121_PRIVATE_KEY_BASE58: &str = "";
+pub const STRATEGY_V_131_PRIVATE_KEY_ENCRYPTED: &str = "";
+pub const STRATEGY_V_131_PRIVATE_KEY_BASE58: &str = "";
 
 pub const BUY_SLIPPAGE_BPS: u64 = 2000;
 pub const SELL_SLIPPAGE_BPS: u64 = 5000;

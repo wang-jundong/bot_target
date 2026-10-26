@@ -3,7 +3,7 @@
 use crate::config::{
     StrategyName, StrategyV011Config, StrategyV022Config, StrategyV031Config, StrategyV051Config,
     StrategyV061Config, StrategyV071Config, StrategyV081Config, StrategyV101Config,
-    StrategyV121Config,
+    StrategyV121Config, StrategyV131Config,
 };
 use crate::strategy::common::MarketEvent;
 use crate::strategy::v011::{Decision, StrategyV011Engine};
@@ -15,6 +15,7 @@ use crate::strategy::v071::StrategyV071Engine;
 use crate::strategy::v081::StrategyV081Engine;
 use crate::strategy::v101::StrategyV101Engine;
 use crate::strategy::v121::StrategyV121Engine;
+use crate::strategy::v131::StrategyV131Engine;
 
 pub enum Engine {
     V011(StrategyV011Engine),
@@ -26,6 +27,7 @@ pub enum Engine {
     V081(StrategyV081Engine),
     V101(StrategyV101Engine),
     V121(StrategyV121Engine),
+    V131(StrategyV131Engine),
 }
 
 impl Engine {
@@ -65,6 +67,10 @@ impl Engine {
         Self::V121(StrategyV121Engine::new(cfg, own_wallet))
     }
 
+    pub fn new_v131(cfg: StrategyV131Config, own_wallet: impl Into<String>) -> Self {
+        Self::V131(StrategyV131Engine::new(cfg, own_wallet))
+    }
+
     pub fn name(&self) -> StrategyName {
         match self {
             Self::V011(_) => StrategyName::V011,
@@ -76,6 +82,7 @@ impl Engine {
             Self::V081(_) => StrategyName::V081,
             Self::V101(_) => StrategyName::V101,
             Self::V121(_) => StrategyName::V121,
+            Self::V131(_) => StrategyName::V131,
         }
     }
 
@@ -94,6 +101,7 @@ impl Engine {
             Self::V081(e) => e.phase_name().to_string(),
             Self::V101(e) => e.phase_name().to_string(),
             Self::V121(e) => e.phase_name().to_string(),
+            Self::V131(e) => e.phase_name().to_string(),
         }
     }
 
@@ -108,6 +116,7 @@ impl Engine {
             Self::V081(e) => e.needs_pool_tape(),
             Self::V101(e) => e.needs_pool_tape(),
             Self::V121(e) => e.needs_pool_tape(),
+            Self::V131(e) => e.needs_pool_tape(),
         }
     }
 
@@ -122,6 +131,7 @@ impl Engine {
             Self::V081(e) => e.is_bound(),
             Self::V101(e) => e.is_bound(),
             Self::V121(e) => e.is_bound(),
+            Self::V131(e) => e.is_bound(),
         }
     }
 
@@ -136,6 +146,7 @@ impl Engine {
             Self::V081(e) => e.is_done(),
             Self::V101(e) => e.is_done(),
             Self::V121(e) => e.is_done(),
+            Self::V131(e) => e.is_done(),
         }
     }
 
@@ -150,6 +161,7 @@ impl Engine {
             Self::V081(e) => e.last_buy_reason(),
             Self::V101(e) => e.last_buy_reason(),
             Self::V121(e) => e.last_buy_reason(),
+            Self::V131(e) => e.last_buy_reason(),
         }
     }
 
@@ -164,6 +176,7 @@ impl Engine {
             Self::V081(e) => e.last_sell_reason(),
             Self::V101(e) => e.last_sell_reason(),
             Self::V121(e) => e.last_sell_reason(),
+            Self::V131(e) => e.last_sell_reason(),
         }
     }
 
@@ -178,6 +191,7 @@ impl Engine {
             Self::V081(e) => e.buy_size_sol(),
             Self::V101(e) => e.buy_size_sol(),
             Self::V121(e) => e.buy_size_sol(),
+            Self::V131(e) => e.buy_size_sol(),
         }
     }
 
@@ -191,7 +205,8 @@ impl Engine {
             | Self::V071(_)
             | Self::V081(_)
             | Self::V101(_)
-            | Self::V121(_) => 1_000,
+            | Self::V121(_)
+            | Self::V131(_) => 1_000,
         }
     }
 
@@ -230,6 +245,10 @@ impl Engine {
                 e.on_buy_fill(fill_px, now_ms);
                 None
             }
+            Self::V131(e) => {
+                e.on_buy_fill(fill_px, now_ms);
+                None
+            }
         }
     }
 
@@ -244,6 +263,7 @@ impl Engine {
             Self::V081(e) => e.apply_missed_target_sell(),
             Self::V101(e) => e.apply_missed_target_sell(),
             Self::V121(e) => e.apply_missed_target_sell(),
+            Self::V131(e) => e.apply_missed_target_sell(),
         }
     }
 
@@ -258,6 +278,7 @@ impl Engine {
             Self::V081(e) => e.on_buy_failed(),
             Self::V101(e) => e.on_buy_failed(),
             Self::V121(e) => e.on_buy_failed(),
+            Self::V131(e) => e.on_buy_failed(),
         }
     }
 
@@ -272,6 +293,7 @@ impl Engine {
             Self::V081(e) => e.on_sell_fill(),
             Self::V101(e) => e.on_sell_fill(),
             Self::V121(e) => e.on_sell_fill(),
+            Self::V131(e) => e.on_sell_fill(),
         }
     }
 
@@ -286,6 +308,7 @@ impl Engine {
             Self::V081(e) => e.on_sell_failed(now_ms),
             Self::V101(e) => e.on_sell_failed(now_ms),
             Self::V121(e) => e.on_sell_failed(now_ms),
+            Self::V131(e) => e.on_sell_failed(now_ms),
         }
     }
 
@@ -302,6 +325,7 @@ impl Engine {
             Self::V081(e) => e.restore_hold(entry_px, now_ms),
             Self::V101(e) => e.restore_hold(entry_px, now_ms),
             Self::V121(e) => e.restore_hold(entry_px, now_ms),
+            Self::V131(e) => e.restore_hold(entry_px, now_ms),
         }
     }
 
@@ -327,6 +351,7 @@ impl Engine {
             Self::V081(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V101(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V121(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
+            Self::V131(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
         }
     }
 
@@ -346,6 +371,7 @@ impl Engine {
             Self::V081(e) => e.on_event(event),
             Self::V101(e) => e.on_event(event),
             Self::V121(e) => e.on_event(event),
+            Self::V131(e) => e.on_event(event),
         }
     }
 
@@ -409,6 +435,12 @@ impl Engine {
                 e.on_clock(now_ms, mark_px)
             }
             Self::V121(e) => {
+                if !holding {
+                    return None;
+                }
+                e.on_clock(now_ms, mark_px)
+            }
+            Self::V131(e) => {
                 if !holding {
                     return None;
                 }

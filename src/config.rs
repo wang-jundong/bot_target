@@ -17,6 +17,7 @@ pub enum StrategyName {
     V081,
     V101,
     V121,
+    V131,
 }
 
 impl StrategyName {
@@ -31,6 +32,7 @@ impl StrategyName {
             Self::V081 => "strategy_v_081",
             Self::V101 => "strategy_v_101",
             Self::V121 => "strategy_v_121",
+            Self::V131 => "strategy_v_131",
         }
     }
 
@@ -45,6 +47,7 @@ impl StrategyName {
             "strategy_v_081" => Some(Self::V081),
             "strategy_v_101" => Some(Self::V101),
             "strategy_v_121" => Some(Self::V121),
+            "strategy_v_131" => Some(Self::V131),
             _ => None,
         }
     }
@@ -337,16 +340,16 @@ pub struct StrategyV071Config {
 }
 
 impl StrategyV071Config {
-    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-23 update).
-    /// `min_mc_sol` is 0, so only the 70 SOL cap applies. Zero `min_entry_s`,
-    /// `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and `max_hold_s` disable those
-    /// bounds. `size_sol` is the live position size.
+    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-26 update).
+    /// The entry clock is 3s through 90s. `min_mc_sol` is 0, so only the 70 SOL
+    /// cap applies. Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
+    /// and `max_hold_s` disable those bounds. `size_sol` is the live position size.
     pub fn default_v071() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
             dust_sol: 0.8,
-            min_entry_s: 1.5,
-            max_entry_s: 45.0,
+            min_entry_s: 3.0,
+            max_entry_s: 90.0,
             min_mc_sol: 0.0,
             max_mc_sol: 70.0,
             sell_hit_count: 5,
@@ -556,6 +559,85 @@ impl StrategyV121Config {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StrategyV131Config {
+    pub gate_wallet: String,
+    pub dust_sol: f64,
+    pub min_entry_s: f64,
+    pub max_entry_s: f64,
+    pub buy_hit_count: u32,
+    pub buy_hit_min: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
+    pub min_largest_buy_sol: f64,
+    pub max_largest_buy_sol: f64,
+    pub min_price_ratio: f64,
+    pub max_price_ratio: f64,
+    pub min_buy_round_trip_holders: u32,
+    pub max_buy_round_trip_holders: u32,
+    pub sell_hit_count: u32,
+    pub sell_hit_min: f64,
+    pub take_profit: f64,
+    pub max_hold_s: f64,
+    pub target_sell_exit: bool,
+    pub second_buy_exit: bool,
+    pub first_cycle_only: bool,
+    pub repeat_entries: bool,
+    pub size_sol: f64,
+}
+
+impl StrategyV131Config {
+    /// Knobs from scalpingbot `config/strategy_v_131.json` (2026-10-26).
+    /// `buy_hit_count` of 0 buys the first print inside the clock. Zero
+    /// `min_entry_s`, `max_entry_s`, `min_price_ratio`, `max_price_ratio`,
+    /// `min_mc_sol`, `max_mc_sol`, `min_largest_buy_sol`, `max_largest_buy_sol`,
+    /// `min_buy_round_trip_holders`, `max_buy_round_trip_holders`, and
+    /// `max_hold_s` disable those bounds. `size_sol` matches that config.
+    pub fn default_v131() -> Self {
+        let mut cfg = Self {
+            gate_wallet: "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9".to_string(),
+            dust_sol: 0.1,
+            min_entry_s: 0.0,
+            max_entry_s: 12.0,
+            buy_hit_count: 2,
+            buy_hit_min: 0.5,
+            min_mc_sol: 0.0,
+            max_mc_sol: 90.0,
+            min_largest_buy_sol: 1.0,
+            max_largest_buy_sol: 12.0,
+            min_price_ratio: 0.7,
+            max_price_ratio: 0.0,
+            min_buy_round_trip_holders: 0,
+            max_buy_round_trip_holders: 0,
+            sell_hit_count: 2,
+            sell_hit_min: 5.0,
+            take_profit: 0.25,
+            max_hold_s: 60.0,
+            target_sell_exit: true,
+            second_buy_exit: false,
+            first_cycle_only: false,
+            repeat_entries: false,
+            size_sol: 0.3,
+        };
+        if cfg.sell_hit_count < 1 {
+            cfg.sell_hit_count = 1;
+        }
+        if cfg.min_largest_buy_sol < 0.0 {
+            cfg.min_largest_buy_sol = 0.0;
+        }
+        if cfg.max_largest_buy_sol < 0.0 {
+            cfg.max_largest_buy_sol = 0.0;
+        }
+        if cfg.min_price_ratio < 0.0 {
+            cfg.min_price_ratio = 0.0;
+        }
+        if cfg.max_price_ratio < 0.0 {
+            cfg.max_price_ratio = 0.0;
+        }
+        cfg
+    }
+}
+
 impl StrategyV101Config {
     /// Knobs from scalpingbot `config/strategy_v_101.json` (2026-10-23).
     /// `buy_hit_count` of 0 buys the first print inside the clock. Zero
@@ -621,6 +703,7 @@ pub struct AppConfig {
     pub strategy_v081: StrategyV081Config,
     pub strategy_v101: StrategyV101Config,
     pub strategy_v121: StrategyV121Config,
+    pub strategy_v131: StrategyV131Config,
     pub blocked_mints: String,
     pub vibe_grpc_endpoint: String,
     pub vibe_grpc_token: String,
@@ -676,6 +759,7 @@ pub fn load_config() -> Result<AppConfig> {
     let strategy_v081 = StrategyV081Config::default_v081();
     let strategy_v101 = StrategyV101Config::default_v101();
     let strategy_v121 = StrategyV121Config::default_v121();
+    let strategy_v131 = StrategyV131Config::default_v131();
     let mut strategy_plans = Vec::with_capacity(active.len());
     for name in &active {
         strategy_plans.push(build_plan(
@@ -689,6 +773,7 @@ pub fn load_config() -> Result<AppConfig> {
             &strategy_v081,
             &strategy_v101,
             &strategy_v121,
+            &strategy_v131,
         )?);
     }
     let strategy_label = active
@@ -709,6 +794,7 @@ pub fn load_config() -> Result<AppConfig> {
         strategy_v081,
         strategy_v101,
         strategy_v121,
+        strategy_v131,
         blocked_mints: settings::BLOCKED_MINTS.to_string(),
         vibe_grpc_endpoint: vibe_endpoint,
         vibe_grpc_token: vibe_token,
@@ -753,6 +839,7 @@ fn build_plan(
     v081: &StrategyV081Config,
     v101: &StrategyV101Config,
     v121: &StrategyV121Config,
+    v131: &StrategyV131Config,
 ) -> Result<StrategyPlan> {
     let (target_wallet, size_sol, max_mc, target_sell_exit, first_cycle_only) = match name {
         StrategyName::V011 => (
@@ -818,6 +905,13 @@ fn build_plan(
             v121.target_sell_exit,
             v121.first_cycle_only,
         ),
+        StrategyName::V131 => (
+            v131.gate_wallet.clone(),
+            v131.size_sol,
+            0.0,
+            v131.target_sell_exit,
+            v131.first_cycle_only,
+        ),
     };
     if target_wallet.trim().len() < 32 {
         bail!("{} gate_wallet is missing", name.as_str());
@@ -877,6 +971,10 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
         StrategyName::V121 => (
             settings::STRATEGY_V_121_PRIVATE_KEY_ENCRYPTED,
             settings::STRATEGY_V_121_PRIVATE_KEY_BASE58,
+        ),
+        StrategyName::V131 => (
+            settings::STRATEGY_V_131_PRIVATE_KEY_ENCRYPTED,
+            settings::STRATEGY_V_131_PRIVATE_KEY_BASE58,
         ),
     };
     let private_key = if !encrypted.trim().is_empty() {
