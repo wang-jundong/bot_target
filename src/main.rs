@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bot_target::config::load_config;
 use bot_target::execution::{BlockhashCache, LiveExecution};
 use bot_target::geyser::{self, GeyserHandle};
@@ -330,6 +331,22 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!(error = %err, "[02 STREAM] geyser task exited");
         }
     });
+
+    if config
+        .strategy_plans
+        .iter()
+        .any(|plan| plan.quote_pairs.allows(false))
+    {
+        let authority = executions
+            .first()
+            .context("non-SOL trading needs a wallet for the lookup table")?;
+        bot_target::venues::common_alt::ensure(
+            &rpc,
+            &authority.wallet,
+            std::path::Path::new(&config.recovery_path),
+        )
+        .await?;
+    }
 
     let runtime = TradingRuntime::new(
         Arc::clone(&config),

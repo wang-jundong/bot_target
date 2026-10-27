@@ -478,12 +478,12 @@ fn compile_v0(
         ),
     ];
     instructions.extend(prepared.instructions.iter().cloned());
-    let message = v0::Message::try_compile(
-        &prepared.payer,
-        &instructions,
-        &prepared.lookup_tables,
-        blockhash,
-    )?;
+    let mut lookup_tables = prepared.lookup_tables.clone();
+    if let Some(common) = super::common_alt::cached() {
+        lookup_tables.push(common);
+    }
+    let message =
+        v0::Message::try_compile(&prepared.payer, &instructions, &lookup_tables, blockhash)?;
     Ok(VersionedTransaction::try_new(
         VersionedMessage::V0(message),
         &[keypair],

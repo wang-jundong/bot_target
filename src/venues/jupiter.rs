@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 const QUOTE_URL: &str = "https://lite-api.jup.ag/swap/v1/quote";
 /// One call returns the swap instructions and the lookup-table addresses.
 const BUILD_URL: &str = "https://lite-api.jup.ag/swap/v2/build";
+/// Jupiter's default of 64 fills the v0 packet. The pump buy, ATA creates, and tip share it.
+const MAX_ACCOUNTS: u8 = 32;
 const COMPUTE_BUDGET: &str = "ComputeBudget111111111111111111111111111111";
 
 #[derive(Clone)]
@@ -395,7 +397,7 @@ async fn fetch_leg(
     slippage_bps: u64,
 ) -> Result<Leg> {
     let url = format!(
-        "{BUILD_URL}?inputMint={input}&outputMint={output}&amount={amount}&taker={user}&slippageBps={slippage_bps}"
+        "{BUILD_URL}?inputMint={input}&outputMint={output}&amount={amount}&taker={user}&slippageBps={slippage_bps}&maxAccounts={MAX_ACCOUNTS}"
     );
     let response = http().get(&url).send().await.context("jupiter build")?;
     let status = response.status();
@@ -429,7 +431,7 @@ async fn fetch_leg(
 
 async fn quote(input: &Pubkey, output: &Pubkey, amount: u64, slippage_bps: u64) -> Result<Value> {
     let url = format!(
-        "{QUOTE_URL}?inputMint={input}&outputMint={output}&amount={amount}&slippageBps={slippage_bps}&restrictIntermediateTokens=true"
+        "{QUOTE_URL}?inputMint={input}&outputMint={output}&amount={amount}&slippageBps={slippage_bps}&restrictIntermediateTokens=true&maxAccounts={MAX_ACCOUNTS}"
     );
     let response = http().get(&url).send().await.context("jupiter quote")?;
     let status = response.status();

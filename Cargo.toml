@@ -40,6 +40,7 @@ sha2 = "0.10"
 # line; nothing in this crate calls it, and SPL 8/9 does not track pubkey 4.
 # gRPC transport follows New Folder: keepalive + in-place filter updates.
 solana-account-decoder-client-types = "=4.3.2"
+solana-address-lookup-table-interface = { version = "=3.2.0", features = ["bincode"] }
 solana-client = "=4.3.2"
 solana-commitment-config = "=3.1.1"
 solana-compute-budget-interface = "=3.1.0"
