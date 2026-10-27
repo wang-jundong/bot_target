@@ -48,6 +48,18 @@ pub const STRATEGY_V_121_PRIVATE_KEY_BASE58: &str = "";
 pub const STRATEGY_V_131_PRIVATE_KEY_ENCRYPTED: &str = "";
 pub const STRATEGY_V_131_PRIVATE_KEY_BASE58: &str = "";
 
+/// Pairs this strategy opens: "sol", "non_sol", or "both". Empty means sol.
+pub const STRATEGY_V_011_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_022_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_031_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_051_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_061_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_071_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_081_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_101_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_121_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_131_QUOTE_PAIRS: &str = "";
+
 pub const BUY_SLIPPAGE_BPS: u64 = 2000;
 pub const SELL_SLIPPAGE_BPS: u64 = 5000;
 pub const PRIORITY_FEE_LAMPORTS: u64 = 100_000;

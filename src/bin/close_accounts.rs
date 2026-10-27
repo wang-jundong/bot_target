@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
                 compute_unit_limit: config.compute_unit_limit.max(200_000),
                 priority_fee_lamports: config.priority_fee_lamports,
                 tip_lamports: 0,
+                lookup_tables: Vec::new(),
             };
             let blockhash = rpc.get_latest_blockhash().await?;
             let tx = compile_trade(&prepared, blockhash, &plan.keypair)?;

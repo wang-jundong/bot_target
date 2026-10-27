@@ -3,6 +3,7 @@ use crate::journal::PositionPrices;
 use crate::strategy::engine::Engine;
 use anyhow::{Result, bail};
 use solana_sdk::instruction::Instruction;
+use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -136,6 +137,7 @@ pub struct PreparedTrade {
     pub compute_unit_limit: u32,
     pub priority_fee_lamports: u64,
     pub tip_lamports: u64,
+    pub lookup_tables: Vec<AddressLookupTableAccount>,
 }
 
 pub struct EventBuffer {

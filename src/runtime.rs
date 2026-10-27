@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, StrategyName, journal_record_matches_strategy};
+use crate::config::{AppConfig, QuotePairs, StrategyName, journal_record_matches_strategy};
 use crate::events::{
     PoolTradeEvent, Side, lamports_to_sol, pool_key, sol_to_lamports_f64, to_strategy_price,
 };
@@ -15,7 +15,7 @@ use solana_account_decoder_client_types::UiAccountData;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::Signer;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -25,6 +25,7 @@ struct StrategySlot {
     target_wallet: String,
     target_sell_exit: bool,
     first_cycle_only: bool,
+    quote_pairs: QuotePairs,
     buy_amount_lamports: u64,
     execution: Arc<LiveExecution>,
     tokens: Mutex<HashMap<String, Arc<Mutex<TokenInner>>>>,
@@ -43,6 +44,18 @@ pub struct TradingRuntime {
     inbound: Mutex<Option<mpsc::Receiver<crate::events::ParsedTargetTransaction>>>,
     received: std::sync::atomic::AtomicU64,
     decoded: std::sync::atomic::AtomicU64,
+    /// Non-SOL prints whose SOL price is not cached yet. Resolved off the tape loop.
+    deferred: Mutex<HashMap<String, DeferredPrints>>,
+}
+
+struct PendingPrint {
+    descriptor: crate::events::PoolDescriptor,
+    event: PoolTradeEvent,
+}
+
+struct DeferredPrints {
+    queue: VecDeque<PendingPrint>,
+    running: bool,
 }
 
 impl TradingRuntime {
@@ -64,6 +77,7 @@ impl TradingRuntime {
                     target_wallet: plan.target_wallet.clone(),
                     target_sell_exit: plan.target_sell_exit,
                     first_cycle_only: plan.first_cycle_only,
+                    quote_pairs: plan.quote_pairs,
                     buy_amount_lamports: plan.buy_amount_lamports,
                     execution,
                     tokens: Mutex::new(HashMap::new()),
@@ -82,6 +96,7 @@ impl TradingRuntime {
             inbound: Mutex::new(Some(inbound)),
             received: std::sync::atomic::AtomicU64::new(0),
             decoded: std::sync::atomic::AtomicU64::new(0),
+            deferred: Mutex::new(HashMap::new()),
         })
     }
 
@@ -156,7 +171,7 @@ impl TradingRuntime {
         for slot in &self.slots {
             let tokens: Vec<_> = slot.tokens.lock().await.values().cloned().collect();
             for token in tokens {
-                let (signal, buy_reason, sell_reason, key, strategy, needed, changed) = {
+                let (signal, buy_reason, sell_reason, key, strategy, needed, changed, warm) = {
                     let mut state = token.lock().await;
                     if matches!(state.lifecycle, Lifecycle::Closed | Lifecycle::Failed) {
                         continue;
@@ -171,6 +186,21 @@ impl TradingRuntime {
                     let needed = state.engine.needs_pool_tape();
                     let changed = state.pool_tape_needed != Some(needed);
                     state.pool_tape_needed = Some(needed);
+                    let warm =
+                        if crate::venues::ids::is_sol_quote(state.descriptor.quote_mint.as_deref())
+                        {
+                            None
+                        } else {
+                            Some((
+                                state.descriptor.mint.clone(),
+                                sol_to_lamports_f64(state.engine.buy_size_sol()),
+                                if is_holding {
+                                    state.actual_token_amount.unwrap_or(0)
+                                } else {
+                                    0
+                                },
+                            ))
+                        };
                     (
                         signal.map(|s| s.to_string()),
                         state.engine.last_buy_reason(),
@@ -179,8 +209,19 @@ impl TradingRuntime {
                         state.strategy_name.clone(),
                         needed,
                         changed,
+                        warm,
                     )
                 };
+                if let Some((mint, lamports, sell_tokens)) = warm {
+                    slot.execution.venues.warm_quote(
+                        Arc::clone(&slot.execution.rpc),
+                        slot.execution.wallet.pubkey(),
+                        mint,
+                        lamports,
+                        sell_tokens,
+                        self.config.sell_slippage_bps,
+                    );
+                }
                 if changed {
                     self.sync_pool_need(slot, &key, needed).await;
                 }
@@ -204,7 +245,7 @@ impl TradingRuntime {
         self.decoded
             .fetch_add(trades.len() as u64, std::sync::atomic::Ordering::Relaxed);
         for parsed in trades {
-            let event = parsed.event;
+            let mut event = parsed.event;
             let descriptor = parsed.descriptor;
             if let Some(curve) = event.curve.clone() {
                 // Shared venue cache — any slot's execution venues work.
@@ -219,22 +260,144 @@ impl TradingRuntime {
                     .venues
                     .note_swap(&descriptor.mint, swap);
             }
-            let mut created = Vec::new();
-            for slot in &self.slots {
-                if self.apply_slot(slot, &descriptor, &event).await? {
-                    created.push(slot.name.as_str());
-                }
+            let sol_pair = is_sol_pair(&descriptor, &event);
+            let wants_non_sol = self.slots.iter().any(|slot| slot.quote_pairs.allows(false));
+            if !sol_pair && !wants_non_sol && !self.any_slot_tracks(&descriptor).await {
+                continue;
             }
-            if !created.is_empty() {
-                tracing::info!(
-                    mint = %descriptor.mint,
-                    pool = %descriptor.pool,
-                    strategies = ?created,
-                    "[03 DETECT] Target bought token; now tracking pool"
-                );
+            if sol_pair {
+                self.deliver(&descriptor, event, true).await?;
+                continue;
             }
+            let key = pool_key(&descriptor.program_id, &descriptor.pool);
+            if !self.scale_is_pending(&key).await
+                && self.apply_cached_scale(&descriptor, &mut event)
+            {
+                self.deliver(&descriptor, event, false).await?;
+                continue;
+            }
+            self.defer_unscaled(descriptor, event).await;
         }
         Ok(())
+    }
+
+    async fn deliver(
+        self: &Arc<Self>,
+        descriptor: &crate::events::PoolDescriptor,
+        event: PoolTradeEvent,
+        sol_pair: bool,
+    ) -> Result<()> {
+        let mut created = Vec::new();
+        for slot in &self.slots {
+            if self.apply_slot(slot, descriptor, &event, sol_pair).await? {
+                created.push(slot.name.as_str());
+            }
+        }
+        if !created.is_empty() {
+            tracing::info!(
+                mint = %descriptor.mint,
+                pool = %descriptor.pool,
+                strategies = ?created,
+                "[03 DETECT] Target bought token; now tracking pool"
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_cached_scale(
+        &self,
+        descriptor: &crate::events::PoolDescriptor,
+        event: &mut PoolTradeEvent,
+    ) -> bool {
+        let quote = quote_mint_of(descriptor, event);
+        let Some(venues) = self.slots.first().map(|slot| &slot.execution.venues) else {
+            return false;
+        };
+        let Some(scale) = venues.cached_quote_scale(&descriptor.mint, quote) else {
+            return false;
+        };
+        event.sol_amount = (event.sol_amount as f64 * scale).round() as u64;
+        event.price *= scale;
+        true
+    }
+
+    async fn scale_is_pending(&self, key: &str) -> bool {
+        self.deferred
+            .lock()
+            .await
+            .get(key)
+            .is_some_and(|entry| entry.running || !entry.queue.is_empty())
+    }
+
+    async fn defer_unscaled(
+        self: &Arc<Self>,
+        descriptor: crate::events::PoolDescriptor,
+        event: PoolTradeEvent,
+    ) {
+        let key = pool_key(&descriptor.program_id, &descriptor.pool);
+        let mint = descriptor.mint.clone();
+        let start = {
+            let mut deferred = self.deferred.lock().await;
+            let entry = deferred
+                .entry(key.clone())
+                .or_insert_with(|| DeferredPrints {
+                    queue: VecDeque::new(),
+                    running: false,
+                });
+            entry.queue.push_back(PendingPrint { descriptor, event });
+            if entry.running {
+                false
+            } else {
+                entry.running = true;
+                true
+            }
+        };
+        if !start {
+            return;
+        }
+        tracing::info!(
+            mint = %mint,
+            "[03 DETECT] Pricing non-SOL pair off the tape loop"
+        );
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime.drain_unscaled(key).await;
+        });
+    }
+
+    async fn drain_unscaled(self: &Arc<Self>, key: String) {
+        loop {
+            let next = {
+                let mut deferred = self.deferred.lock().await;
+                let Some(entry) = deferred.get_mut(&key) else {
+                    return;
+                };
+                if let Some(print) = entry.queue.pop_front() {
+                    Some(print)
+                } else {
+                    entry.running = false;
+                    if entry.queue.is_empty() {
+                        None
+                    } else {
+                        entry.running = true;
+                        continue;
+                    }
+                }
+            };
+            let Some(PendingPrint {
+                descriptor,
+                mut event,
+            }) = next
+            else {
+                return;
+            };
+            if !self.in_sol_units(&descriptor, &mut event).await {
+                continue;
+            }
+            if let Err(err) = self.deliver(&descriptor, event, false).await {
+                tracing::error!(error = %err, "[ERROR] Transaction processing failed");
+            }
+        }
     }
 
     async fn apply_slot(
@@ -242,20 +405,16 @@ impl TradingRuntime {
         slot: &Arc<StrategySlot>,
         descriptor: &crate::events::PoolDescriptor,
         event: &PoolTradeEvent,
+        sol_pair: bool,
     ) -> Result<bool> {
         let key = pool_key(&descriptor.program_id, &descriptor.pool);
         let existing = slot.tokens.lock().await.get(&key).cloned();
         let token = if let Some(token) = existing {
             token
-        } else if event.trader == slot.target_wallet && event.side == Side::Buy {
-            if !sol_pair(descriptor, event) {
-                tracing::info!(
-                    mint = %descriptor.mint,
-                    quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
-                    "[03 DETECT] Skipping non-SOL pair"
-                );
-                return Ok(false);
-            }
+        } else if event.trader == slot.target_wallet
+            && event.side == Side::Buy
+            && slot.quote_pairs.allows(sol_pair)
+        {
             let engine = self.make_engine(slot);
             let token = Arc::new(Mutex::new(TokenInner::new(
                 descriptor.clone(),
@@ -284,6 +443,16 @@ impl TradingRuntime {
                 .await
                 .insert(key.clone(), Arc::clone(&token));
             self.mark_pool_needed(slot, &key, descriptor).await;
+            if !crate::venues::ids::is_sol_quote(descriptor.quote_mint.as_deref()) {
+                slot.execution.venues.warm_quote(
+                    Arc::clone(&slot.execution.rpc),
+                    slot.execution.wallet.pubkey(),
+                    descriptor.mint.clone(),
+                    slot.buy_amount_lamports,
+                    0,
+                    self.config.sell_slippage_bps,
+                );
+            }
             // Gate buy only binds; later prints / timers decide entry.
             return Ok(true);
         } else {
@@ -544,12 +713,12 @@ impl TradingRuntime {
         token: &Mutex<TokenInner>,
         reason: &str,
     ) -> bool {
-        {
+        let plan = {
             let mut state = token.lock().await;
             if holding(&state) || !state.claim_buy_send() {
                 return false;
             }
-            if !self.can_open(&state) {
+            if !self.can_open(slot, &state) {
                 state.sell_after_fill = false;
                 state.reset_buy_send_claim();
                 state.engine.on_buy_failed();
@@ -571,8 +740,7 @@ impl TradingRuntime {
             state.buy_slippage_bps = Some(self.config.buy_slippage_bps);
             state.sell_slippage_bps = Some(self.config.sell_slippage_bps);
             let strategy = state.strategy_name.clone();
-            tracing::info!(strategy, mint = %state.descriptor.mint, reason, size_sol = size, "[05 ENTRY] buy signal");
-            let owner = slot.execution.wallet.pubkey();
+            let lamports = state.buy_lamports.unwrap_or(0);
             let mint = state.descriptor.mint.clone();
             let venue = state.descriptor.venue.clone();
             let token_program = state
@@ -580,33 +748,46 @@ impl TradingRuntime {
                 .token_program
                 .clone()
                 .unwrap_or_else(|| (*crate::venues::ids::TOKEN_PROGRAM).to_string());
-            let token_program = token_program
-                .parse()
-                .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
-            match slot.execution.venues.build_buy(
+            tracing::info!(strategy, mint = %mint, reason, size_sol = size, "[05 ENTRY] buy signal");
+            (strategy, lamports, mint, venue, token_program)
+        };
+        let (strategy, lamports, mint, venue, token_program) = plan;
+        let owner = slot.execution.wallet.pubkey();
+        let token_program = token_program
+            .parse()
+            .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
+        match slot
+            .execution
+            .venues
+            .build_buy(
+                &self.rpc,
                 &venue,
                 &owner,
                 &mint,
                 &token_program,
-                state.buy_lamports.unwrap_or(0),
+                lamports,
                 self.config.buy_slippage_bps,
-            ) {
-                Ok(prepared) => {
-                    state.prepared_buy = Some(prepared);
-                    if let Err(err) = state.transition(Lifecycle::BuyPrepared) {
-                        tracing::error!(error = %err, strategy, "[05 ENTRY] buy failed");
-                        state.engine.on_buy_failed();
-                        state.reset_buy_send_claim();
-                        return false;
-                    }
-                }
-                Err(err) => {
-                    tracing::error!(error = %err, strategy, mint = %mint, "[05 ENTRY] buy failed");
-                    state.sell_after_fill = false;
+                false,
+            )
+            .await
+        {
+            Ok(prepared) => {
+                let mut state = token.lock().await;
+                state.prepared_buy = Some(prepared);
+                if let Err(err) = state.transition(Lifecycle::BuyPrepared) {
+                    tracing::error!(error = %err, strategy = %strategy, "[05 ENTRY] buy failed");
                     state.engine.on_buy_failed();
                     state.reset_buy_send_claim();
                     return false;
                 }
+            }
+            Err(err) => {
+                tracing::error!(error = %err, strategy = %strategy, mint = %mint, "[05 ENTRY] buy failed");
+                let mut state = token.lock().await;
+                state.sell_after_fill = false;
+                state.engine.on_buy_failed();
+                state.reset_buy_send_claim();
+                return false;
             }
         }
         if let Err(err) = slot.execution.send_buy(token).await {
@@ -652,7 +833,11 @@ impl TradingRuntime {
         }
     }
 
-    fn can_open(&self, state: &TokenInner) -> bool {
+    fn can_open(&self, slot: &StrategySlot, state: &TokenInner) -> bool {
+        let sol_pair = crate::venues::ids::is_sol_quote(state.descriptor.quote_mint.as_deref());
+        if !slot.quote_pairs.allows(sol_pair) {
+            return false;
+        }
         let blocked: Vec<&str> = self
             .config
             .blocked_mints
@@ -662,14 +847,6 @@ impl TradingRuntime {
             .collect();
         if blocked.iter().any(|mint| *mint == state.descriptor.mint) {
             tracing::warn!(mint = %state.descriptor.mint, "[05 ENTRY] Buy blocked: mint denylist");
-            return false;
-        }
-        if !crate::venues::ids::is_sol_quote(state.descriptor.quote_mint.as_deref()) {
-            tracing::info!(
-                mint = %state.descriptor.mint,
-                quote_mint = state.descriptor.quote_mint.as_deref().unwrap_or(""),
-                "[05 ENTRY] Buy skipped: non-SOL pair"
-            );
             return false;
         }
         true
@@ -837,14 +1014,6 @@ impl TradingRuntime {
                 continue;
             };
             if matches!(record.lifecycle.as_deref(), Some("CLOSED" | "FAILED")) {
-                continue;
-            }
-            if !crate::venues::ids::is_sol_quote(descriptor.quote_mint.as_deref()) {
-                tracing::info!(
-                    mint = %descriptor.mint,
-                    quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
-                    "[07 POSITION] Skipping recovery of non-SOL pair"
-                );
                 continue;
             }
             let buy_sig = record
@@ -1028,8 +1197,63 @@ impl TradingRuntime {
     }
 }
 
-fn sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) -> bool {
-    let quote = descriptor
+impl TradingRuntime {
+    async fn any_slot_tracks(&self, descriptor: &crate::events::PoolDescriptor) -> bool {
+        let key = pool_key(&descriptor.program_id, &descriptor.pool);
+        for slot in &self.slots {
+            if slot.tokens.lock().await.contains_key(&key) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn in_sol_units(
+        &self,
+        descriptor: &crate::events::PoolDescriptor,
+        event: &mut PoolTradeEvent,
+    ) -> bool {
+        let quote = quote_mint_of(descriptor, event).map(str::to_string);
+        if crate::venues::ids::is_sol_quote(quote.as_deref()) {
+            return true;
+        }
+        if self.apply_cached_scale(descriptor, event) {
+            return true;
+        }
+        let Some(venues) = self.slots.first().map(|slot| &slot.execution.venues) else {
+            return false;
+        };
+        match venues
+            .quote_lamports_per_raw(&self.rpc, &descriptor.mint)
+            .await
+        {
+            Ok(scale) => {
+                event.sol_amount = (event.sol_amount as f64 * scale).round() as u64;
+                event.price *= scale;
+                true
+            }
+            Err(err) => {
+                tracing::info!(
+                    mint = %descriptor.mint,
+                    quote_mint = quote.as_deref().unwrap_or(""),
+                    error = %err,
+                    "[03 DETECT] Skipping non-SOL pair; no SOL route"
+                );
+                false
+            }
+        }
+    }
+}
+
+fn is_sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) -> bool {
+    crate::venues::ids::is_sol_quote(quote_mint_of(descriptor, event))
+}
+
+fn quote_mint_of<'a>(
+    descriptor: &'a crate::events::PoolDescriptor,
+    event: &'a PoolTradeEvent,
+) -> Option<&'a str> {
+    descriptor
         .quote_mint
         .as_deref()
         .or_else(|| {
@@ -1038,8 +1262,7 @@ fn sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) 
                 .as_ref()
                 .and_then(|curve| curve.quote_mint.as_deref())
         })
-        .or_else(|| event.swap.as_ref().map(|swap| swap.quote_mint.as_str()));
-    crate::venues::ids::is_sol_quote(quote)
+        .or_else(|| event.swap.as_ref().map(|swap| swap.quote_mint.as_str()))
 }
 
 fn now_ms() -> u64 {

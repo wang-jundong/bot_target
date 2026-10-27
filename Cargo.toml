@@ -32,7 +32,7 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 # Agave 4.3 client + solana-sdk 4.1 (solana-message 4.5 / solana-transaction 4.3).
 # That line is the first that can build and read v1 transactions (SIMD-0385).

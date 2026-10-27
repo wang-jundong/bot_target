@@ -53,6 +53,42 @@ impl StrategyName {
     }
 }
 
+/// Which quote pairs a strategy is allowed to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotePairs {
+    Sol,
+    NonSol,
+    Both,
+}
+
+impl QuotePairs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sol => "sol",
+            Self::NonSol => "non_sol",
+            Self::Both => "both",
+        }
+    }
+
+    /// Empty and `sol` keep the strategy on SOL pairs.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "sol" => Ok(Self::Sol),
+            "non_sol" => Ok(Self::NonSol),
+            "both" => Ok(Self::Both),
+            other => bail!("quote pairs must be sol, non_sol, or both (got {other})"),
+        }
+    }
+
+    pub fn allows(self, sol_pair: bool) -> bool {
+        match self {
+            Self::Sol => sol_pair,
+            Self::NonSol => !sol_pair,
+            Self::Both => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StrategyV011Config {
     pub gate_wallet: String,
@@ -683,6 +719,7 @@ pub struct StrategyPlan {
     pub keypair: Keypair,
     pub target_sell_exit: bool,
     pub first_cycle_only: bool,
+    pub quote_pairs: QuotePairs,
 }
 
 impl StrategyPlan {
@@ -923,6 +960,8 @@ fn build_plan(
     if name == StrategyName::V022 && max_mc <= 0.0 {
         bail!("{} max market cap must be positive", name.as_str());
     }
+    let quote_pairs = QuotePairs::parse(quote_pairs_setting(name))
+        .with_context(|| format!("{} QUOTE_PAIRS", name.as_str()))?;
     Ok(StrategyPlan {
         name,
         target_wallet: target_wallet.trim().to_string(),
@@ -931,7 +970,23 @@ fn build_plan(
         keypair: resolve_trading_keypair(name)?,
         target_sell_exit,
         first_cycle_only,
+        quote_pairs,
     })
+}
+
+fn quote_pairs_setting(name: StrategyName) -> &'static str {
+    match name {
+        StrategyName::V011 => settings::STRATEGY_V_011_QUOTE_PAIRS,
+        StrategyName::V022 => settings::STRATEGY_V_022_QUOTE_PAIRS,
+        StrategyName::V031 => settings::STRATEGY_V_031_QUOTE_PAIRS,
+        StrategyName::V051 => settings::STRATEGY_V_051_QUOTE_PAIRS,
+        StrategyName::V061 => settings::STRATEGY_V_061_QUOTE_PAIRS,
+        StrategyName::V071 => settings::STRATEGY_V_071_QUOTE_PAIRS,
+        StrategyName::V081 => settings::STRATEGY_V_081_QUOTE_PAIRS,
+        StrategyName::V101 => settings::STRATEGY_V_101_QUOTE_PAIRS,
+        StrategyName::V121 => settings::STRATEGY_V_121_QUOTE_PAIRS,
+        StrategyName::V131 => settings::STRATEGY_V_131_QUOTE_PAIRS,
+    }
 }
 
 fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
@@ -1034,5 +1089,25 @@ pub fn journal_record_matches_strategy(
     match record_strategy {
         Some(value) => StrategyName::parse(value) == Some(slot_name),
         None => active.first().copied() == Some(slot_name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QuotePairs;
+
+    #[test]
+    fn quote_pairs_parse_and_filter() {
+        assert_eq!(QuotePairs::parse("").unwrap(), QuotePairs::Sol);
+        assert_eq!(QuotePairs::parse("SOL").unwrap(), QuotePairs::Sol);
+        assert_eq!(QuotePairs::parse("non_sol").unwrap(), QuotePairs::NonSol);
+        assert_eq!(QuotePairs::parse("both").unwrap(), QuotePairs::Both);
+        assert!(QuotePairs::parse("everything").is_err());
+        assert!(QuotePairs::Sol.allows(true));
+        assert!(!QuotePairs::Sol.allows(false));
+        assert!(!QuotePairs::NonSol.allows(true));
+        assert!(QuotePairs::NonSol.allows(false));
+        assert!(QuotePairs::Both.allows(true));
+        assert!(QuotePairs::Both.allows(false));
     }
 }

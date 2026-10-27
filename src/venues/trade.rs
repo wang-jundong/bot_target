@@ -410,7 +410,7 @@ fn amm_accounts(
     accounts
 }
 
-fn wrap_wsol(
+pub(crate) fn wrap_wsol(
     owner: &Pubkey,
     quote_mint: &Pubkey,
     quote_program: &Pubkey,
@@ -445,6 +445,7 @@ fn prepared(
         compute_unit_limit,
         priority_fee_lamports,
         tip_lamports,
+        lookup_tables: Vec::new(),
     }
 }
 
@@ -477,7 +478,12 @@ fn compile_v0(
         ),
     ];
     instructions.extend(prepared.instructions.iter().cloned());
-    let message = v0::Message::try_compile(&prepared.payer, &instructions, &[], blockhash)?;
+    let message = v0::Message::try_compile(
+        &prepared.payer,
+        &instructions,
+        &prepared.lookup_tables,
+        blockhash,
+    )?;
     Ok(VersionedTransaction::try_new(
         VersionedMessage::V0(message),
         &[keypair],
@@ -631,6 +637,7 @@ mod tests {
             compute_unit_limit: 150_000,
             priority_fee_lamports: 10_000,
             tip_lamports: 5_000,
+            lookup_tables: Vec::new(),
         };
         let tx = compile_v1(&prepared, Hash::default(), &payer).unwrap();
         let VersionedMessage::V1(message) = &tx.message else {

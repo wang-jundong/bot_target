@@ -126,25 +126,62 @@ impl LiveExecution {
                     .token_program
                     .clone()
                     .unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string());
-                let token_program = token_program_owned.parse()?;
                 let venue = state.descriptor.venue.clone();
                 let mint = state.descriptor.mint.clone();
-                if attempt > 1 || state.prepared_buy.is_none() {
-                    state.prepared_buy = Some(self.venues.build_buy(
+                let cached = if attempt > 1 || state.prepared_buy.is_none() {
+                    None
+                } else {
+                    state.prepared_buy.clone()
+                };
+                (cached, venue, mint, token_program_owned, lamports, slippage)
+            };
+            let (cached, venue, mint, token_program_owned, lamports, slippage) = prepared;
+            let token_program = match token_program_owned.parse::<Pubkey>() {
+                Ok(program) => program,
+                Err(err) => {
+                    last_error = err.to_string();
+                    tracing::warn!(attempt, error = %last_error, "[05 ENTRY] Buy attempt failed");
+                    continue;
+                }
+            };
+            let prepared = if let Some(cached) = cached {
+                Some(cached)
+            } else {
+                match self
+                    .venues
+                    .build_buy(
+                        &self.rpc,
                         &venue,
                         &self.wallet.pubkey(),
                         &mint,
                         &token_program,
                         lamports,
                         slippage,
-                    )?);
+                        attempt > 1,
+                    )
+                    .await
+                {
+                    Ok(built) => {
+                        token.lock().await.prepared_buy = Some(built.clone());
+                        Some(built)
+                    }
+                    Err(err) => {
+                        last_error = err.to_string();
+                        token.lock().await.prepared_buy = None;
+                        tracing::warn!(attempt, mint = %mint, error = %last_error, "[05 ENTRY] Buy attempt failed");
+                        None
+                    }
                 }
-                state.prepared_buy.clone()
             };
             let Some(prepared) = prepared else {
-                last_error = "buy was not prepared".to_string();
                 continue;
             };
+            self.venues.prime_sell(
+                Arc::clone(&self.rpc),
+                self.wallet.pubkey(),
+                mint.clone(),
+                self.sell_slippage_bps,
+            );
             match self
                 .submit_and_confirm(token, &prepared, true, attempt, None)
                 .await
@@ -229,41 +266,52 @@ impl LiveExecution {
                 self.close_empty_position(&mut state, reason, "position token amount is zero");
                 return Ok(());
             }
-            let prepared = {
-                let mut state = token.lock().await;
-                let slippage = state.sell_slippage_bps.unwrap_or(self.sell_slippage_bps);
-                let token_program: Pubkey = match state
-                    .descriptor
-                    .token_program
-                    .clone()
-                    .unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string())
-                    .parse()
-                {
-                    Ok(program) => program,
-                    Err(err) => {
-                        last_error = err.to_string();
-                        tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
-                        continue;
-                    }
-                };
-                let venue = state.descriptor.venue.clone();
-                let mint = state.descriptor.mint.clone();
-                match self.venues.build_sell(
+            let (slippage, token_program_owned, venue, mint) = {
+                let state = token.lock().await;
+                (
+                    state.sell_slippage_bps.unwrap_or(self.sell_slippage_bps),
+                    state
+                        .descriptor
+                        .token_program
+                        .clone()
+                        .unwrap_or_else(|| crate::venues::ids::TOKEN_PROGRAM.to_string()),
+                    state.descriptor.venue.clone(),
+                    state.descriptor.mint.clone(),
+                )
+            };
+            let token_program = match token_program_owned.parse::<Pubkey>() {
+                Ok(program) => program,
+                Err(err) => {
+                    last_error = err.to_string();
+                    tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
+                    continue;
+                }
+            };
+            let built = match self
+                .venues
+                .build_sell(
+                    &self.rpc,
                     &venue,
                     &self.wallet.pubkey(),
                     &mint,
                     &token_program,
                     amount,
                     slippage,
-                ) {
-                    Ok(built) => state.prepared_sell = Some(built),
-                    Err(err) => {
-                        last_error = err.to_string();
-                        state.prepared_sell = None;
-                        tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
-                        continue;
-                    }
+                    attempt > 1,
+                )
+                .await
+            {
+                Ok(built) => built,
+                Err(err) => {
+                    last_error = err.to_string();
+                    token.lock().await.prepared_sell = None;
+                    tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
+                    continue;
                 }
+            };
+            let prepared = {
+                let mut state = token.lock().await;
+                state.prepared_sell = Some(built);
                 if let Err(err) = state.begin_sell_attempt() {
                     last_error = err.to_string();
                     tracing::warn!(attempt, error = %last_error, "[08 EXIT] Sell attempt failed");
@@ -602,9 +650,14 @@ impl LiveExecution {
                         result = &mut fetch => result,
                     } {
                         Ok(tx) => {
-                            if let Some(fill) =
-                                parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue)
-                            {
+                            if let Some(fill) = parse_fill_from_tx(
+                                &tx,
+                                &self.wallet.pubkey(),
+                                mint,
+                                venue,
+                                self.venues.trades_native_sol(mint),
+                                self.venues.tip_lamports,
+                            ) {
                                 return Ok(fill);
                             }
                             // Confirmed but fill not parseable yet — keep polling.
@@ -657,7 +710,14 @@ impl LiveExecution {
         {
             return Ok(None);
         }
-        Ok(parse_fill_from_tx(&tx, &self.wallet.pubkey(), mint, venue))
+        Ok(parse_fill_from_tx(
+            &tx,
+            &self.wallet.pubkey(),
+            mint,
+            venue,
+            self.venues.trades_native_sol(mint),
+            self.venues.tip_lamports,
+        ))
     }
 
     fn record_value(&self, state: &TokenInner, event: &str, extra: Value) -> Value {
@@ -841,10 +901,29 @@ pub fn parse_fill_from_tx(
     owner: &Pubkey,
     mint: &str,
     venue: &str,
+    native_sol: bool,
+    tip_lamports: u64,
 ) -> Option<(u64, u64, f64)> {
     let meta = tx.transaction.meta.as_ref()?;
     if meta.err.is_some() {
         return None;
+    }
+    if !native_sol {
+        let owner_s = owner.to_string();
+        let pre = token_balance_sum(&meta.pre_token_balances, &owner_s, mint);
+        let post = token_balance_sum(&meta.post_token_balances, &owner_s, mint);
+        let token_amount = pre.abs_diff(post);
+        if token_amount == 0 {
+            return None;
+        }
+        let sol_amount = sol_delta_for_owner(tx, owner)
+            .saturating_sub(meta.fee)
+            .saturating_sub(tip_lamports);
+        return Some((
+            token_amount,
+            sol_amount,
+            sol_amount as f64 / token_amount as f64,
+        ));
     }
     let logs = match &meta.log_messages {
         OptionSerializer::Some(logs) => logs.as_slice(),

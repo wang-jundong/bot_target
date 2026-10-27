@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v011;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v022;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     buy_hit_count = c.buy_hit_count,
@@ -57,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v031;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -83,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v051;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -102,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v061;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -122,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v071;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -141,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v081;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -171,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v101;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     min_entry_s = c.min_entry_s,
@@ -197,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v121;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     dust_sol = c.dust_sol,
@@ -226,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
                 let c = &config.strategy_v131;
                 tracing::info!(
                     strategy = plan.name.as_str(),
+                    quote_pairs = plan.quote_pairs.as_str(),
                     target_wallet = %plan.target_wallet,
                     size_sol = c.size_sol,
                     dust_sol = c.dust_sol,

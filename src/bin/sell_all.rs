@@ -4,8 +4,9 @@ use bot_target::events::{PumpCurveSnapshot, PumpSwapSnapshot, mono_ms};
 use bot_target::helius::HeliusSender;
 use bot_target::venues::ids::{
     PUMP_BUYBACK_FEE_RECIPIENTS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT, amm_global_config,
-    bonding_curve_pda, canonical_pool_pda, parse_amm_global_config, parse_amm_pool,
+    bonding_curve_pda, canonical_pool_pda, is_sol_quote, parse_amm_global_config, parse_amm_pool,
 };
+use bot_target::venues::route::{self, Book};
 use bot_target::venues::trade::{
     build_amm_sell, build_pump_sell, compile_trade, transaction_wire_bytes,
 };
@@ -101,14 +102,32 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 };
                 let venue = if curve.0 { "pumpswap" } else { "pump" };
+                let quote = curve.1.quote_mint.as_deref().unwrap_or("");
                 println!(
-                    "sell {mint_str} amount={amount} venue={venue}{}",
+                    "sell {mint_str} amount={amount} venue={venue} quote={quote}{}",
                     if dry_run { " dry-run" } else { "" }
                 );
                 if dry_run {
                     continue;
                 }
-                let prepared = if curve.0 {
+                let prepared = if !is_sol_quote(curve.1.quote_mint.as_deref()) {
+                    route::prepare(
+                        &Book::new(),
+                        &rpc,
+                        &owner,
+                        &mint,
+                        false,
+                        amount,
+                        config.sell_slippage_bps,
+                        config.compute_unit_limit.max(400_000),
+                        config.priority_fee_lamports,
+                        config.helius_tip_lamports,
+                        true,
+                        Some(&curve.1),
+                        None,
+                    )
+                    .await?
+                } else if curve.0 {
                     let swap = fetch_amm_swap(&rpc, &mint, &program).await?;
                     build_amm_sell(
                         &owner,
@@ -209,7 +228,11 @@ async fn fetch_curve(
             real_token_reserves: real_token as u128,
             creator: creator.to_string(),
             mayhem_mode: account.data.len() > 8 + 73 && data[73] != 0,
-            quote_mint: Some(WSOL_MINT.to_string()),
+            quote_mint: if data.len() >= 75 + 32 {
+                Some(Pubkey::new_from_array(data[75..107].try_into().unwrap()).to_string())
+            } else {
+                Some(WSOL_MINT.to_string())
+            },
             protocol_fee_bps: 100,
             creator_fee_bps: if creator == Pubkey::default() { 0 } else { 30 },
             fee_recipient: None,

@@ -1,7 +1,8 @@
 use super::ids::{
-    PUMP_AMM_PROGRAM, PUMP_FEE_PROGRAM, PUMP_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
-    amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume, amm_user_volume,
-    ata, bonding_curve_pda, coin_creator_vault_authority, is_pump_fee_recipient, pool_v2_pda,
+    PUMP_AMM_PROGRAM, PUMP_BUYBACK_FEE_RECIPIENTS, PUMP_FEE_PROGRAM, PUMP_PROGRAM,
+    TOKEN_2022_PROGRAM, TOKEN_PROGRAM, amm_event_authority, amm_fee_config, amm_global_config,
+    amm_global_volume, amm_user_volume, ata, bonding_curve_pda, coin_creator_vault_authority,
+    is_pump_fee_recipient, pool_v2_pda, quote_amount_spent,
 };
 use crate::events::{
     CompiledIx, ParsedTargetTransaction, PoolDescriptor, PoolTradeEvent, PumpCurveSnapshot,
@@ -149,18 +150,20 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
         }
     }
     let quote_mint = c.pubkey();
-    let _quote_amount = c.u64();
+    let quote_amount = c.u64();
     let virtual_quote = c.u64();
     let mint_s = mint.to_string();
     let pool = bonding_curve_pda(&mint).to_string();
     let token_program = token_program_for(tx, &mint_s);
+    let quote_mint_s = quote_mint.map(|k| k.to_string());
+    let spent = quote_amount_spent(quote_mint_s.as_deref(), sol_amount, quote_amount);
     let descriptor = PoolDescriptor {
         mint: mint_s.clone(),
         pool: pool.clone(),
         program_id: PUMP_PROGRAM.to_string(),
         venue: "pump".to_string(),
         token_program,
-        quote_mint: quote_mint.map(|k| k.to_string()),
+        quote_mint: quote_mint_s.clone(),
         pool_base_token_account: None,
         pool_quote_token_account: None,
         relevant_accounts: vec![pool.clone(), mint_s.clone()],
@@ -173,7 +176,7 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
         &descriptor,
         &user.to_string(),
         is_buy,
-        sol_amount,
+        spent,
         token_amount,
         price,
         None,
@@ -194,7 +197,7 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
             real_token_reserves: real_token as u128,
             creator: creator.to_string(),
             mayhem_mode: mayhem,
-            quote_mint: quote_mint.map(|k| k.to_string()),
+            quote_mint: quote_mint_s,
             protocol_fee_bps: fee_bps.unwrap_or(0) as u128,
             creator_fee_bps: creator_fee_bps.unwrap_or(0) as u128,
             fee_recipient,
@@ -276,34 +279,34 @@ fn amm_trade(
         Some(1.0),
         timestamp,
     );
-    if let Some(buyback) = buyback_recipient(
+    let buyback = buyback_recipient(
         tx,
         &pool_s,
         &user.to_string(),
         &vaults,
         &coin_creator,
         &protocol_recipient,
-    ) {
-        event.swap = Some(PumpSwapSnapshot {
-            pool: pool_s,
-            base_mint: vaults.0.mint.clone(),
-            quote_mint: vaults.1.mint.clone(),
-            pool_base_token_account: vaults.0.address.clone(),
-            pool_quote_token_account: vaults.1.address.clone(),
-            base_token_program: vaults.0.program_id.clone(),
-            quote_token_program: vaults.1.program_id.clone(),
-            base_reserve: pool_base as u128,
-            quote_reserve: pool_quote as u128,
-            virtual_quote_reserves: virtual_quote,
-            lp_fee_bps: lp_bps as u128,
-            protocol_fee_bps: protocol_bps as u128,
-            coin_creator_fee_bps: creator_bps as u128,
-            coin_creator: coin_creator.to_string(),
-            protocol_fee_recipient: protocol_recipient.to_string(),
-            buyback_fee_recipient: buyback,
-            cashback: cashback_bps > 0,
-        });
-    }
+    )
+    .unwrap_or_else(|| PUMP_BUYBACK_FEE_RECIPIENTS[0].to_string());
+    event.swap = Some(PumpSwapSnapshot {
+        pool: pool_s,
+        base_mint: vaults.0.mint.clone(),
+        quote_mint: vaults.1.mint.clone(),
+        pool_base_token_account: vaults.0.address.clone(),
+        pool_quote_token_account: vaults.1.address.clone(),
+        base_token_program: vaults.0.program_id.clone(),
+        quote_token_program: vaults.1.program_id.clone(),
+        base_reserve: pool_base as u128,
+        quote_reserve: pool_quote as u128,
+        virtual_quote_reserves: virtual_quote,
+        lp_fee_bps: lp_bps as u128,
+        protocol_fee_bps: protocol_bps as u128,
+        coin_creator_fee_bps: creator_bps as u128,
+        coin_creator: coin_creator.to_string(),
+        protocol_fee_recipient: protocol_recipient.to_string(),
+        buyback_fee_recipient: buyback,
+        cashback: cashback_bps > 0,
+    });
     Some(ParsedTrade { descriptor, event })
 }
 

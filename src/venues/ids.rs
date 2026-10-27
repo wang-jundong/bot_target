@@ -26,6 +26,22 @@ pub fn is_sol_quote(quote_mint: Option<&str>) -> bool {
     }
 }
 
+/// Non-SOL curves report the spend in `quote_amount`. The legacy `sol_amount`
+/// field is zero on those trades.
+pub fn quote_amount_spent(
+    quote_mint: Option<&str>,
+    sol_amount: u64,
+    quote_amount: Option<u64>,
+) -> u64 {
+    if is_sol_quote(quote_mint) {
+        sol_amount
+    } else {
+        quote_amount
+            .filter(|amount| *amount > 0)
+            .unwrap_or(sol_amount)
+    }
+}
+
 pub static PUMP_FEE_RECIPIENTS: LazyLock<Vec<Pubkey>> = LazyLock::new(|| {
     vec![
         "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM",
@@ -282,7 +298,7 @@ pub fn parse_amm_global_config(data: &[u8]) -> Option<AmmGlobalConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_sol_quote;
+    use super::{is_sol_quote, quote_amount_spent};
 
     #[test]
     fn sol_quotes_are_native_sol_and_wsol() {
@@ -294,5 +310,13 @@ mod tests {
         assert!(!is_sol_quote(Some(
             "PrekqLJvJ3qVdXmBGDiexvwUTF4rLFDa6HWS4HJbw9S"
         )));
+    }
+
+    #[test]
+    fn non_sol_spends_are_the_quote_amount() {
+        let usdc = Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(quote_amount_spent(usdc, 0, Some(2_500_000)), 2_500_000);
+        assert_eq!(quote_amount_spent(None, 1_000, Some(2_500_000)), 1_000);
+        assert_eq!(quote_amount_spent(usdc, 40, None), 40);
     }
 }
