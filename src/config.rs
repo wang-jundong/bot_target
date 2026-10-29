@@ -328,6 +328,11 @@ pub struct StrategyV071Config {
     pub max_entry_s: f64,
     pub min_mc_sol: f64,
     pub max_mc_sol: f64,
+    pub buy_pressure_s: f64,
+    pub min_buy_pressure: f64,
+    pub max_buy_pressure: f64,
+    pub min_round_trip_holders: u32,
+    pub max_round_trip_holders: u32,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
@@ -340,18 +345,28 @@ pub struct StrategyV071Config {
 }
 
 impl StrategyV071Config {
-    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-26 update).
-    /// The entry clock is 3s through 90s. `min_mc_sol` is 0, so only the 70 SOL
-    /// cap applies. Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
-    /// and `max_hold_s` disable those bounds. `size_sol` is the live position size.
+    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-29 update).
+    /// The entry clock is 40s through 41.5s. Market cap is off. Buy pressure
+    /// is off (`buy_pressure_s` is 0), so the stored 0.4 pressure cap does not
+    /// apply. Both round-trip holder bounds are 0, so that filter is off.
+    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
+    /// `buy_pressure_s`, `max_buy_pressure`, `min_round_trip_holders`,
+    /// `max_round_trip_holders`, and `max_hold_s` disable those bounds.
+    /// A pressure score or holder count equal to a bound still buys.
+    /// `size_sol` stays at the live position size, not the backtest size.
     pub fn default_v071() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
             dust_sol: 0.8,
-            min_entry_s: 3.0,
-            max_entry_s: 90.0,
+            min_entry_s: 40.0,
+            max_entry_s: 41.5,
             min_mc_sol: 0.0,
-            max_mc_sol: 70.0,
+            max_mc_sol: 0.0,
+            buy_pressure_s: 0.0,
+            min_buy_pressure: 0.0,
+            max_buy_pressure: 0.4,
+            min_round_trip_holders: 0,
+            max_round_trip_holders: 0,
             sell_hit_count: 5,
             sell_hit_min: 8.0,
             take_profit: 1.2,
@@ -364,6 +379,9 @@ impl StrategyV071Config {
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
+        }
+        if cfg.max_buy_pressure < 0.0 {
+            cfg.max_buy_pressure = 0.0;
         }
         cfg
     }

@@ -1,11 +1,19 @@
-//! strategy_v_071 — clock entry inside a market-cap band, then a buy-run exit.
+//! strategy_v_071 — clock entry, then a buy-run exit.
 //!
 //! Same flow as scalpingbot `strategy_v_071.py`, for
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
-//! Knobs from `config/strategy_v_071.json` (2026-10-26).
-//! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, or `max_hold_s`
-//! of 0 disables that bound. Max sell is 80% of the bag.
-//! One instance per mint.
+//! Knobs from `config/strategy_v_071.json` (2026-10-29).
+//! Buy pressure is `(B - S) / (B + S)` over the last `buy_pressure_s`
+//! seconds, including this print. Round-trip holders are other wallets that
+//! have both bought and sold since this cycle's target buy. Order does not
+//! matter, the current print counts, and the target wallet does not.
+//! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
+//! `buy_pressure_s`, `max_buy_pressure`, `min_round_trip_holders`,
+//! `max_round_trip_holders`, or `max_hold_s` of 0 disables that bound.
+//! A score or holder count equal to a bound still buys. Max sell is 80% of
+//! the bag. One instance per mint.
+
+use std::collections::HashSet;
 
 use crate::config::StrategyV071Config;
 use crate::strategy::common::{
@@ -42,6 +50,9 @@ struct FlowState {
     second_buy_seen: bool,
     now_ms: u64,
     diag: BuyDiag,
+    pressure: Vec<(u64, u8, f64)>,
+    rt_buy: HashSet<String>,
+    rt_sell: HashSet<String>,
     opened_at: Option<ChainCursor>,
     closed_at: Option<ChainCursor>,
 }
@@ -52,6 +63,8 @@ pub struct BuyDiag {
     pub end_ret: f64,
     pub mcap: f64,
     pub buy_hit_sol: f64,
+    pub buy_pressure: Option<f64>,
+    pub round_trip_holders: u32,
 }
 
 fn fresh_state() -> FlowState {
@@ -71,6 +84,9 @@ fn fresh_state() -> FlowState {
         second_buy_seen: false,
         now_ms: 0,
         diag: BuyDiag::default(),
+        pressure: Vec::new(),
+        rt_buy: HashSet::new(),
+        rt_sell: HashSet::new(),
         opened_at: None,
         closed_at: None,
     }
@@ -172,6 +188,9 @@ impl StrategyV071Engine {
         self.st.t0_ms = now_ms;
         self.st.now_ms = self.st.t0_ms;
         self.st.px0 = if price > 0.0 { price } else { 0.0 };
+        if sol > 0.0 {
+            self.note_pressure(SIDE_BUY, sol);
+        }
         self.last_px = self.st.px0;
         self.bound = true;
         self.buy_reason.clear();
@@ -288,6 +307,7 @@ impl StrategyV071Engine {
             event.price,
             is_target,
             is_own,
+            &event.wallet,
             event.timestamp_ms,
             cursor_of(event),
         );
@@ -384,6 +404,26 @@ impl StrategyV071Engine {
         {
             return None;
         }
+        let pressure = if self.cfg.buy_pressure_s > 0.0 {
+            self.buy_pressure()
+        } else {
+            None
+        };
+        if self.cfg.buy_pressure_s > 0.0
+            && pressure.is_none_or(|score| score < self.cfg.min_buy_pressure)
+        {
+            return None;
+        }
+        if self.cfg.buy_pressure_s > 0.0
+            && self.cfg.max_buy_pressure > 0.0
+            && pressure.is_some_and(|score| score > self.cfg.max_buy_pressure)
+        {
+            return None;
+        }
+        if self.round_trip_blocks() {
+            return None;
+        }
+        let holders = self.round_trip_count();
         self.st.hit_sol = 0.0;
         self.st.phase = PHASE_PENDING;
         self.st.why = "clock".to_string();
@@ -393,9 +433,87 @@ impl StrategyV071Engine {
             end_ret: round(chase, 4),
             mcap: round(mcap, 3),
             buy_hit_sol: 0.0,
+            buy_pressure: pressure.map(|score| round(score, 4)),
+            round_trip_holders: holders as u32,
         };
         clear_streak(&mut self.st);
         Some("BUY")
+    }
+
+    fn note_pressure(&mut self, side: u8, sol: f64) {
+        if self.cfg.buy_pressure_s <= 0.0 {
+            self.st.pressure.clear();
+            return;
+        }
+        if (side == SIDE_BUY || side == SIDE_SELL) && sol > 0.0 {
+            self.st.pressure.push((self.st.now_ms, side, sol));
+        }
+        let span = self.cfg.buy_pressure_s * 1000.0;
+        let now = self.st.now_ms;
+        let drop = self
+            .st
+            .pressure
+            .iter()
+            .position(|(ts_ms, _, _)| now.saturating_sub(*ts_ms) as f64 <= span)
+            .unwrap_or(self.st.pressure.len());
+        if drop > 0 {
+            self.st.pressure.drain(0..drop);
+        }
+    }
+
+    fn note_round_trip(&mut self, side: u8, sol: f64, tokens: f64, is_target: bool, wallet: &str) {
+        if is_target
+            || wallet.is_empty()
+            || self.st.phase == PHASE_IDLE
+            || self.st.phase == PHASE_DONE
+        {
+            return;
+        }
+        if side == SIDE_BUY && sol > 0.0 {
+            self.st.rt_buy.insert(wallet.to_string());
+            return;
+        }
+        if side == SIDE_SELL && sol > 0.0 && tokens > 0.0 {
+            self.st.rt_sell.insert(wallet.to_string());
+        }
+    }
+
+    fn round_trip_count(&self) -> usize {
+        self.st.rt_buy.intersection(&self.st.rt_sell).count()
+    }
+
+    fn round_trip_blocks(&self) -> bool {
+        let lo = self.cfg.min_round_trip_holders;
+        let hi = self.cfg.max_round_trip_holders;
+        if lo == 0 && hi == 0 {
+            return false;
+        }
+        let n = self.round_trip_count() as u32;
+        if lo > 0 && n < lo {
+            return true;
+        }
+        if hi > 0 && n > hi {
+            return true;
+        }
+        false
+    }
+
+    fn buy_pressure(&self) -> Option<f64> {
+        let mut buys = 0.0;
+        let mut sells = 0.0;
+        for &(_, side, sol) in &self.st.pressure {
+            if side == SIDE_BUY {
+                buys += sol;
+            } else if side == SIDE_SELL {
+                sells += sol;
+            }
+        }
+        let total = buys + sells;
+        if total <= 0.0 {
+            None
+        } else {
+            Some((buys - sells) / total)
+        }
     }
 
     fn flow_step(
@@ -406,6 +524,7 @@ impl StrategyV071Engine {
         px: f64,
         is_target: bool,
         is_own: bool,
+        wallet: &str,
         now_ms: u64,
         order: ChainCursor,
     ) -> Option<&'static str> {
@@ -422,6 +541,8 @@ impl StrategyV071Engine {
         if is_target && side == SIDE_SELL && self.sell_already_passed(order) {
             return None;
         }
+        self.note_pressure(side, sol);
+        self.note_round_trip(side, sol, tokens, is_target, wallet);
 
         if is_target && side == SIDE_BUY {
             self.st.target_tokens += tokens.max(0.0);
@@ -476,6 +597,8 @@ impl StrategyV071Engine {
             self.st.px0 = px;
             self.st.target_buys = if sol > 0.0 { 1 } else { 0 };
             self.st.second_buy_seen = false;
+            self.st.rt_buy.clear();
+            self.st.rt_sell.clear();
             clear_streak(&mut self.st);
             return None;
         }
@@ -607,9 +730,23 @@ mod tests {
 
     fn arm(engine: &mut StrategyV071Engine) {
         assert_eq!(
-            engine.on_event(&print("BUY", 0.1, "arm", T0 + 3_000)),
+            engine.on_event(&print("BUY", 0.1, "arm", T0 + 40_000)),
             Some("BUY")
         );
+    }
+
+    fn wallet_print(
+        wallet: &str,
+        side: &'static str,
+        sol: f64,
+        tokens: f64,
+        signature: &str,
+        ts: u64,
+    ) -> MarketEvent {
+        let mut event = print(side, sol, signature, ts);
+        event.wallet = wallet.to_string();
+        event.token_amount = tokens;
+        event
     }
 
     fn target_trade(
@@ -635,10 +772,15 @@ mod tests {
             "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA"
         );
         assert_eq!(loaded.dust_sol, 0.8);
-        assert_eq!(loaded.min_entry_s, 3.0);
-        assert_eq!(loaded.max_entry_s, 90.0);
+        assert_eq!(loaded.min_entry_s, 40.0);
+        assert_eq!(loaded.max_entry_s, 41.5);
         assert_eq!(loaded.min_mc_sol, 0.0);
-        assert_eq!(loaded.max_mc_sol, 70.0);
+        assert_eq!(loaded.max_mc_sol, 0.0);
+        assert_eq!(loaded.buy_pressure_s, 0.0);
+        assert_eq!(loaded.min_buy_pressure, 0.0);
+        assert_eq!(loaded.max_buy_pressure, 0.4);
+        assert_eq!(loaded.min_round_trip_holders, 0);
+        assert_eq!(loaded.max_round_trip_holders, 0);
         assert_eq!(loaded.sell_hit_count, 5);
         assert_eq!(loaded.sell_hit_min, 8.0);
         assert_eq!(loaded.take_profit, 1.2);
@@ -651,37 +793,44 @@ mod tests {
     }
 
     #[test]
-    fn buys_first_print_inside_clock_under_mcap_cap() {
+    fn buys_first_print_inside_clock_and_skips_mcap_when_set() {
         let mut engine = bound(|_| {}, "");
         assert_eq!(engine.phase_name(), "seek_sell");
         assert!(engine.needs_pool_tape());
         assert_eq!(
-            engine.on_event(&print("SELL", 0.1, "early", T0 + 2_999)),
+            engine.on_event(&print("SELL", 0.1, "early", T0 + 39_999)),
             None
         );
         assert_eq!(engine.phase_name(), "seek_sell");
 
-        let mut rich = print("BUY", 1.0, "rich", T0 + 3_000);
+        let mut rich = print("BUY", 1.0, "rich", T0 + 40_000);
         rich.price = 71e-9;
-        assert_eq!(engine.on_event(&rich), None);
-        assert_eq!(engine.phase_name(), "seek_sell");
-
-        let mut cheap = print("BUY", 1.0, "cheap", T0 + 4_000);
-        cheap.price = 24e-9;
-        assert_eq!(engine.on_event(&cheap), Some("BUY"));
+        assert_eq!(engine.on_event(&rich), Some("BUY"));
         assert_eq!(engine.phase_name(), "pending");
         assert_eq!(engine.last_buy_reason(), "clock");
-        assert_eq!(engine.last_buy_diag().wall_s, 4.0);
-        assert_eq!(engine.last_buy_diag().mcap, 24.0);
-        assert_eq!(engine.last_buy_diag().end_ret, -0.52);
+        assert_eq!(engine.last_buy_diag().wall_s, 40.0);
+        assert_eq!(engine.last_buy_diag().mcap, 71.0);
+        assert_eq!(engine.last_buy_diag().end_ret, 0.42);
         assert_eq!(engine.last_buy_diag().buy_hit_sol, 0.0);
+        assert_eq!(engine.last_buy_diag().buy_pressure, None);
+        assert_eq!(engine.last_buy_diag().round_trip_holders, 0);
+
+        let mut capped = bound(|cfg| cfg.max_mc_sol = 70.0, "");
+        let mut over = print("BUY", 1.0, "over", T0 + 40_000);
+        over.price = 71e-9;
+        assert_eq!(capped.on_event(&over), None);
+        let mut cheap = print("BUY", 1.0, "cheap", T0 + 41_000);
+        cheap.price = 24e-9;
+        assert_eq!(capped.on_event(&cheap), Some("BUY"));
+        assert_eq!(capped.last_buy_diag().mcap, 24.0);
+        assert_eq!(capped.last_buy_diag().end_ret, -0.52);
 
         let mut floored = bound(|cfg| cfg.min_mc_sol = 25.0, "");
-        let mut under = print("BUY", 1.0, "under-floor", T0 + 3_000);
+        let mut under = print("BUY", 1.0, "under-floor", T0 + 40_000);
         under.price = 24e-9;
         assert_eq!(floored.on_event(&under), None);
         assert_eq!(
-            floored.on_event(&print("SELL", 0.05, "in", T0 + 4_000)),
+            floored.on_event(&print("SELL", 0.05, "in", T0 + 41_000)),
             Some("BUY")
         );
         assert_eq!(floored.last_buy_diag().mcap, 50.0);
@@ -691,19 +840,19 @@ mod tests {
     fn clock_edges_are_inclusive_and_late_print_expires() {
         let mut early_edge = bound(|_| {}, "");
         assert_eq!(
-            early_edge.on_event(&print("BUY", 0.1, "edge", T0 + 3_000)),
+            early_edge.on_event(&print("BUY", 0.1, "edge", T0 + 40_000)),
             Some("BUY")
         );
 
         let mut late_edge = bound(|_| {}, "");
         assert_eq!(
-            late_edge.on_event(&print("BUY", 0.1, "late-edge", T0 + 90_000)),
+            late_edge.on_event(&print("BUY", 0.1, "late-edge", T0 + 41_500)),
             Some("BUY")
         );
 
         let mut expired = bound(|_| {}, "");
         assert_eq!(
-            expired.on_event(&print("BUY", 0.1, "late", T0 + 90_001)),
+            expired.on_event(&print("BUY", 0.1, "late", T0 + 41_501)),
             None
         );
         assert_eq!(expired.phase_name(), "wait");
@@ -846,7 +995,7 @@ mod tests {
         );
         assert_eq!(engine.phase_name(), "seek_sell");
         assert_eq!(
-            engine.on_event(&print("BUY", 0.1, "again", T0 + 10_000)),
+            engine.on_event(&print("BUY", 0.1, "again", T0 + 47_000)),
             Some("BUY")
         );
     }
@@ -876,7 +1025,7 @@ mod tests {
         engine.on_sell_fill();
         assert_eq!(engine.phase_name(), "seek_sell");
         assert_eq!(
-            engine.on_event(&print("BUY", 0.1, "again", T0 + 10_000)),
+            engine.on_event(&print("BUY", 0.1, "again", T0 + 41_000)),
             Some("BUY")
         );
 
@@ -897,7 +1046,7 @@ mod tests {
         engine.on_buy_failed();
         assert_eq!(engine.phase_name(), "seek_sell");
         assert_eq!(
-            engine.on_event(&print("BUY", 0.1, "retry", T0 + 3_000)),
+            engine.on_event(&print("BUY", 0.1, "retry", T0 + 41_000)),
             Some("BUY")
         );
 
@@ -959,5 +1108,194 @@ mod tests {
         engine.apply_missed_target_sell();
         assert_eq!(engine.phase_name(), "idle");
         assert_eq!(engine.last_sell_reason(), "target_sell");
+    }
+
+    fn pressure_cfg(cfg: &mut StrategyV071Config) {
+        cfg.min_entry_s = 0.0;
+        cfg.max_entry_s = 0.0;
+        cfg.buy_pressure_s = 2.0;
+        cfg.min_buy_pressure = 0.0;
+        cfg.max_buy_pressure = 0.5;
+    }
+
+    fn fresh(overrides: impl FnOnce(&mut StrategyV071Config), gate_sol: f64) -> StrategyV071Engine {
+        let mut engine = StrategyV071Engine::new(cfg(overrides), "");
+        engine.bind_gate("target", 1_000.0, 50e-9, gate_sol, T0);
+        engine
+    }
+
+    #[test]
+    fn buy_pressure_bounds_are_inclusive_and_old_prints_drop() {
+        let mut hot = fresh(pressure_cfg, 0.0);
+        assert_eq!(hot.on_event(&print("BUY", 1.0, "only-buy", T0 + 100)), None);
+        assert_eq!(hot.phase_name(), "seek_sell");
+
+        let mut cap = fresh(pressure_cfg, 0.0);
+        assert_eq!(cap.on_event(&print("BUY", 3.0, "bid", T0 + 100)), None);
+        assert_eq!(
+            cap.on_event(&print("SELL", 1.0, "ask", T0 + 200)),
+            Some("BUY")
+        );
+        assert_eq!(cap.last_buy_diag().buy_pressure, Some(0.5));
+
+        let mut floor = fresh(pressure_cfg, 0.0);
+        assert_eq!(
+            floor.on_event(&print("SELL", 1.0, "only-sell", T0 + 100)),
+            None
+        );
+        assert_eq!(
+            floor.on_event(&print("BUY", 1.0, "match", T0 + 200)),
+            Some("BUY")
+        );
+        assert_eq!(floor.last_buy_diag().buy_pressure, Some(0.0));
+
+        let mut gated = fresh(pressure_cfg, 3.0);
+        assert_eq!(
+            gated.on_event(&print("SELL", 1.0, "with-gate", T0 + 100)),
+            Some("BUY")
+        );
+        assert_eq!(gated.last_buy_diag().buy_pressure, Some(0.5));
+
+        let mut empty = fresh(pressure_cfg, 0.0);
+        assert_eq!(empty.on_event(&print("BUY", 0.0, "no-sol", T0 + 100)), None);
+
+        let mut stale = fresh(pressure_cfg, 3.0);
+        assert_eq!(
+            stale.on_event(&print("SELL", 1.0, "later", T0 + 2_500)),
+            None
+        );
+        assert_eq!(
+            stale.on_event(&print("BUY", 3.0, "fresh", T0 + 2_600)),
+            Some("BUY")
+        );
+        assert_eq!(stale.last_buy_diag().buy_pressure, Some(0.5));
+    }
+
+    #[test]
+    fn round_trip_holders_are_inclusive_and_reset_each_cycle() {
+        let mut engine = fresh(
+            |cfg| {
+                cfg.min_entry_s = 0.0;
+                cfg.max_entry_s = 0.0;
+                cfg.min_round_trip_holders = 2;
+                cfg.max_round_trip_holders = 3;
+            },
+            1.0,
+        );
+        assert_eq!(
+            engine.on_event(&target_trade("BUY", 1.0, 10.0, "tb", T0 + 100, 2)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&target_trade("SELL", 1.0, 10.0, "ts", T0 + 150, 3)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("z", "BUY", 0.0, 10.0, "zero", T0 + 180)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("z", "SELL", 1.0, 0.0, "notok", T0 + 190)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("a", "BUY", 1.0, 10.0, "ab", T0 + 200)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("a", "SELL", 1.0, 10.0, "as", T0 + 300)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("b", "SELL", 1.0, 10.0, "bs", T0 + 400)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("b", "BUY", 1.0, 10.0, "bb", T0 + 500)),
+            Some("BUY")
+        );
+        assert_eq!(engine.last_buy_diag().round_trip_holders, 2);
+
+        let mut capped = fresh(
+            |cfg| {
+                cfg.min_entry_s = 10.0;
+                cfg.max_entry_s = 30.0;
+                cfg.min_round_trip_holders = 1;
+                cfg.max_round_trip_holders = 1;
+            },
+            1.0,
+        );
+        assert_eq!(
+            capped.on_event(&wallet_print("a", "BUY", 1.0, 10.0, "ab", T0 + 100)),
+            None
+        );
+        assert_eq!(
+            capped.on_event(&wallet_print("a", "SELL", 1.0, 10.0, "as", T0 + 200)),
+            None
+        );
+        assert_eq!(
+            capped.on_event(&wallet_print("b", "BUY", 1.0, 10.0, "bb", T0 + 300)),
+            None
+        );
+        assert_eq!(
+            capped.on_event(&wallet_print("b", "SELL", 1.0, 10.0, "bs", T0 + 400)),
+            None
+        );
+        assert_eq!(
+            capped.on_event(&print("BUY", 0.1, "crowded", T0 + 10_000)),
+            None
+        );
+        assert_eq!(capped.phase_name(), "seek_sell");
+
+        let mut edge = fresh(
+            |cfg| {
+                cfg.min_entry_s = 10.0;
+                cfg.max_entry_s = 30.0;
+                cfg.min_round_trip_holders = 1;
+                cfg.max_round_trip_holders = 1;
+            },
+            1.0,
+        );
+        assert_eq!(
+            edge.on_event(&wallet_print("a", "SELL", 1.0, 10.0, "as", T0 + 100)),
+            None
+        );
+        assert_eq!(
+            edge.on_event(&wallet_print("a", "BUY", 1.0, 10.0, "ab", T0 + 200)),
+            None
+        );
+        assert_eq!(
+            edge.on_event(&print("BUY", 0.1, "fit", T0 + 10_000)),
+            Some("BUY")
+        );
+        assert_eq!(edge.last_buy_diag().round_trip_holders, 1);
+
+        assert_eq!(
+            engine.on_event(&target_trade("SELL", 1.0, 1_000.0, "flat", T0 + 600, 8)),
+            None
+        );
+        assert_eq!(engine.phase_name(), "idle");
+        assert_eq!(
+            engine.on_event(&target_trade("BUY", 1.0, 1_000.0, "next", T0 + 700, 9)),
+            None
+        );
+        assert_eq!(engine.phase_name(), "seek_sell");
+        assert_eq!(
+            engine.on_event(&wallet_print("a", "BUY", 1.0, 10.0, "ab2", T0 + 800)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("a", "SELL", 1.0, 10.0, "as2", T0 + 900)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("b", "BUY", 1.0, 10.0, "bb2", T0 + 1_000)),
+            None
+        );
+        assert_eq!(
+            engine.on_event(&wallet_print("b", "SELL", 1.0, 10.0, "bs2", T0 + 1_100)),
+            Some("BUY")
+        );
+        assert_eq!(engine.last_buy_diag().round_trip_holders, 2);
     }
 }
