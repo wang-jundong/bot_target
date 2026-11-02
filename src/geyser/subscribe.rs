@@ -1,4 +1,4 @@
-//! Yellowstone subscribe request — same shape as New Folder.
+//! Yellowstone subscribe request.
 //! Target wallet(s) + own wallet(s) in tx `account_include`, then per-mint
 //! pools after warm-up. Reserve accounts stream separately for live curve/vault state.
 

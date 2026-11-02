@@ -115,7 +115,7 @@ pub fn account_data(acc: &SubscribeUpdateAccount) -> Option<&[u8]> {
     Some(acc.account.as_ref()?.data.as_slice())
 }
 
-/// Disc (8) + 5×u64 + complete + creator = 81 core bytes (New Folder layout).
+/// Disc (8) + 5×u64 + complete + creator = 81 core bytes.
 pub fn curve_account_is_complete(data: &[u8]) -> bool {
     const CORE: usize = 8 + 5 * 8 + 1 + 32;
     data.len() >= CORE && data[8 + 40] != 0

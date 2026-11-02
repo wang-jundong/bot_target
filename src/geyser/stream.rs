@@ -1,4 +1,4 @@
-//! Persistent Yellowstone/Geyser stream — transport matches New Folder:
+//! Persistent Yellowstone/Geyser stream:
 //! keepalive, in-place `sink.send` filter updates, 300s without a transaction, 2s reconnect.
 //! Parsed transactions are forwarded on `outbound` for the strategy runtime.
 //!

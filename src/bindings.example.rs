@@ -60,7 +60,7 @@ pub const LOG_LEVEL: &str = "info";
 pub const RECOVERY_PATH: &str = "./recovery/lifecycle.jsonl";
 pub const PNL_PATH: &str = "./logs/pnl.jsonl";
 
-/// Optional. Non-SOL pairs use Jupiter (plugin path). Empty falls back to `JUPITER_API_KEY`.
+/// Optional. Non-SOL pairs use Jupiter. Empty falls back to the `JUPITER_API_KEY` environment variable.
 pub const JUPITER_API_KEY: &str = "";
 
 /// Per strategy. Empty and `sol` trade SOL pairs. `non-sol` trades alt quotes. `all` trades both.

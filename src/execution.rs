@@ -203,7 +203,7 @@ impl LiveExecution {
         quote.parse().ok()
     }
 
-    /// Plugin buy: Jupiter SOL→quote and `buy_exact_quote_in_v2` in one v1 transaction.
+    /// Jupiter SOL→quote and `buy_exact_quote_in_v2` in one v1 transaction.
     async fn send_alt_pump_buy(self: &Arc<Self>, token: &Mutex<TokenInner>) -> Result<()> {
         let mut last_error = String::from("alt-quote buy failed");
         for attempt in 1..=3 {
@@ -434,7 +434,7 @@ impl LiveExecution {
         Ok(())
     }
 
-    /// Plugin buy on LaunchLab: Jupiter SOL→quote and `buy_exact_in` in one v1 transaction.
+    /// LaunchLab buy: Jupiter SOL→quote and `buy_exact_in` in one v1 transaction.
     async fn send_alt_launchpad_buy(self: &Arc<Self>, token: &Mutex<TokenInner>) -> Result<()> {
         let mut last_error = String::from("launchlab buy failed");
         for attempt in 1..=3 {
@@ -1157,7 +1157,7 @@ impl LiveExecution {
         Ok(())
     }
 
-    /// Curve already migrated: sell mint→SOL on Jupiter, same as the plugin fallback.
+    /// Curve already migrated: sell mint→SOL on Jupiter.
     async fn send_alt_migrated_sell(
         self: &Arc<Self>,
         token: &Mutex<TokenInner>,

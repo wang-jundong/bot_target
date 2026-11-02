@@ -110,7 +110,7 @@ impl TradingRuntime {
                 "[01 STARTUP] Quote pairs"
             );
         }
-        tracing::info!("[02 STREAM] Geyser client started (New Folder transport)");
+        tracing::info!("[02 STREAM] Geyser client started");
         self.recover().await?;
         let Some(mut rx) = self.inbound.lock().await.take() else {
             anyhow::bail!("inbound receiver already taken");
@@ -369,7 +369,7 @@ impl TradingRuntime {
                     mint = %descriptor.mint,
                     quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
                     venue = %descriptor.venue,
-                    "[03 DETECT] Alt-quote pair; plugin path"
+                    "[03 DETECT] Alt-quote pair"
                 );
             }
             let engine = self.make_engine(slot);

@@ -1,4 +1,4 @@
-//! Plugin-strategy path for non-SOL pump curves.
+//! Non-SOL pump curve path.
 //!
 //! Buy is one transaction: Jupiter `SOL → quote`, then pump `buy_exact_quote_in_v2`
 //! spending Jupiter's minimum output. If that transaction is too large, the two
@@ -21,18 +21,17 @@ use std::time::{Duration, Instant};
 const JUPITER_PRICE: &str = "https://api.jup.ag/price/v3";
 const JUPITER_BUILD: &str = "https://api.jup.ag/swap/v2/build";
 const WSOL: &str = "So11111111111111111111111111111111111111112";
-/// Plugin `jupiter_buy_slippage_pct` default is 50, so the curve spends the
-/// minimum the SOL→quote hop can still deliver.
+/// 50% slippage, so the curve spends the minimum the SOL→quote hop can still deliver.
 pub const JUPITER_BUY_SLIPPAGE_BPS: u16 = 5_000;
-/// Plugin reclaim uses 1% (`reclaim_quote_to_sol`).
+/// 1% slippage when swapping leftover quote back to SOL.
 pub const JUPITER_RECLAIM_SLIPPAGE_BPS: u16 = 100;
-/// Plugin `jupiter_sell_slippage_pct` default is 100. Used when the curve has migrated.
+/// 100% slippage when the curve has migrated and the bag is sold through Jupiter.
 pub const JUPITER_FLATTEN_SLIPPAGE_BPS: u16 = 10_000;
-/// Plugin waits this long after a flat sell before swapping quote back to SOL.
+/// Wait after a flat sell before swapping quote back to SOL.
 pub const RECLAIM_DELAY: Duration = Duration::from_secs(2);
 /// Second reclaim after a mint is dropped with no position still open.
 pub const ABANDON_RECLAIM_DELAY: Duration = Duration::from_secs(8);
-/// Plugin `jupiter_cu_limit` default. A SOL→quote hop plus the curve does not fit in 150k.
+/// A SOL→quote hop plus the curve does not fit in 150k compute units.
 pub const ALT_COMPUTE_UNIT_LIMIT: u32 = 600_000;
 const FX_MAX_AGE: Duration = Duration::from_secs(60);
 

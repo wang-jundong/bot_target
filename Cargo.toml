@@ -38,7 +38,7 @@ sha2 = "0.10"
 # That line is the first that can build and read v1 transactions (SIMD-0385).
 # Yellowstone proto 12.7 already carries Message.config. SPL stays on its 2.x
 # line; nothing in this crate calls it, and SPL 8/9 does not track pubkey 4.
-# gRPC transport follows New Folder: keepalive + in-place filter updates.
+# gRPC transport: keepalive + in-place filter updates.
 solana-account-decoder-client-types = "=4.3.2"
 solana-client = "=4.3.2"
 solana-commitment-config = "=3.1.1"
