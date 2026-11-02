@@ -16,7 +16,7 @@ pub const ACTIVE_STRATEGIES: &[&str] = &["strategy_v_022", "strategy_v_031"];
 
 pub const BLOCKED_MINTS: &str = "";
 
-pub const VIBE_GRPC_ENDPOINT: &str = "https://elite.grpc.solanavibestation.com";
+pub const VIBE_GRPC_ENDPOINT: &str = "https://basic.grpc.solanavibestation.com";
 pub const VIBE_GRPC_TOKEN: &str = "";
 
 pub const HELIUS_API_KEY: &str = "";
@@ -69,7 +69,7 @@ pub const STRATEGY_V_022_QUOTE_PAIRS: &str = "";
 pub const STRATEGY_V_031_QUOTE_PAIRS: &str = "";
 pub const STRATEGY_V_051_QUOTE_PAIRS: &str = "";
 pub const STRATEGY_V_061_QUOTE_PAIRS: &str = "";
-pub const STRATEGY_V_071_QUOTE_PAIRS: &str = "all";
+pub const STRATEGY_V_071_QUOTE_PAIRS: &str = "";
 pub const STRATEGY_V_081_QUOTE_PAIRS: &str = "";
 pub const STRATEGY_V_101_QUOTE_PAIRS: &str = "";
 pub const STRATEGY_V_121_QUOTE_PAIRS: &str = "";

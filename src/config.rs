@@ -384,7 +384,7 @@ impl StrategyV071Config {
             second_buy_exit: false,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.3,
+            size_sol: 0.2,
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
@@ -615,12 +615,12 @@ pub struct StrategyV131Config {
     pub max_largest_buy_sol: f64,
     pub min_price_ratio: f64,
     pub max_price_ratio: f64,
-    pub min_buy_round_trip_holders: u32,
-    pub max_buy_round_trip_holders: u32,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
     pub max_hold_s: f64,
+    pub progress_s: f64,
+    pub min_progress_ret: f64,
     pub target_sell_exit: bool,
     pub second_buy_exit: bool,
     pub first_cycle_only: bool,
@@ -629,12 +629,12 @@ pub struct StrategyV131Config {
 }
 
 impl StrategyV131Config {
-    /// Knobs from scalpingbot `config/strategy_v_131.json` (2026-10-26).
+    /// Knobs from scalpingbot `config/strategy_v_131.json` (2026-11-02).
     /// `buy_hit_count` of 0 buys the first print inside the clock. Zero
     /// `min_entry_s`, `max_entry_s`, `min_price_ratio`, `max_price_ratio`,
     /// `min_mc_sol`, `max_mc_sol`, `min_largest_buy_sol`, `max_largest_buy_sol`,
-    /// `min_buy_round_trip_holders`, `max_buy_round_trip_holders`, and
-    /// `max_hold_s` disable those bounds. `size_sol` matches that config.
+    /// `progress_s`, and `max_hold_s` disable those bounds. `size_sol` matches
+    /// that config.
     pub fn default_v131() -> Self {
         let mut cfg = Self {
             gate_wallet: "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9".to_string(),
@@ -642,19 +642,19 @@ impl StrategyV131Config {
             min_entry_s: 0.0,
             max_entry_s: 12.0,
             buy_hit_count: 2,
-            buy_hit_min: 0.5,
+            buy_hit_min: 0.3,
             min_mc_sol: 0.0,
             max_mc_sol: 90.0,
             min_largest_buy_sol: 1.0,
             max_largest_buy_sol: 12.0,
-            min_price_ratio: 0.7,
-            max_price_ratio: 0.0,
-            min_buy_round_trip_holders: 0,
-            max_buy_round_trip_holders: 0,
+            min_price_ratio: 1.0,
+            max_price_ratio: 1.8,
             sell_hit_count: 2,
-            sell_hit_min: 5.0,
-            take_profit: 0.25,
-            max_hold_s: 60.0,
+            sell_hit_min: 5.5,
+            take_profit: 0.85,
+            max_hold_s: 30.0,
+            progress_s: 13.0,
+            min_progress_ret: 0.12,
             target_sell_exit: true,
             second_buy_exit: false,
             first_cycle_only: false,
@@ -675,6 +675,9 @@ impl StrategyV131Config {
         }
         if cfg.max_price_ratio < 0.0 {
             cfg.max_price_ratio = 0.0;
+        }
+        if cfg.progress_s < 0.0 {
+            cfg.progress_s = 0.0;
         }
         cfg
     }
