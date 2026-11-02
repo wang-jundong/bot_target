@@ -11,14 +11,11 @@ pub fn parse_transaction(
     info: Option<&SubscribeUpdateTransactionInfo>,
 ) -> Option<ParsedTargetTransaction> {
     let info = info?;
-    if info
+    let failed = info
         .meta
         .as_ref()
         .and_then(|meta| meta.err.as_ref())
-        .is_some()
-    {
-        return None;
-    }
+        .is_some();
     let message = info.transaction.as_ref()?.message.as_ref()?;
     let mut account_keys: Vec<String> = message
         .account_keys
@@ -83,9 +80,15 @@ pub fn parse_transaction(
         .as_ref()
         .map(|meta| meta.log_messages.clone())
         .unwrap_or_default();
+    let (pre_balances, post_balances) = info
+        .meta
+        .as_ref()
+        .map(|meta| (meta.pre_balances.clone(), meta.post_balances.clone()))
+        .unwrap_or_default();
     Some(ParsedTargetTransaction {
         signature: bs58::encode(&info.signature).into_string(),
         slot,
+        transaction_index: Some(info.index),
         timestamp_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -97,7 +100,9 @@ pub fn parse_transaction(
         inner_instructions,
         pre_token_balances,
         post_token_balances,
-        failed: false,
+        pre_balances,
+        post_balances,
+        failed,
     })
 }
 

@@ -355,6 +355,13 @@ impl Engine {
         }
     }
 
+    /// Print-tape age and volume for the v071 cycle that is about to open.
+    pub fn set_v071_open_tape(&mut self, volume: Option<f64>, age_sec: Option<f64>) {
+        if let Self::V071(e) = self {
+            e.set_open_tape(volume, age_sec);
+        }
+    }
+
     /// Process a non-gate pool print. Returns BUY/SELL when the engine fires.
     pub fn on_event(&mut self, event: &MarketEvent, holding: bool) -> Option<&'static str> {
         match self {

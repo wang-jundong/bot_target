@@ -10,6 +10,9 @@ use yellowstone_grpc_proto::prelude::{
     SubscribeRequestFilterTransactions,
 };
 
+use crate::venues::ids::PUMP_PROGRAM;
+use crate::venues::launchpad::{PLATFORM_REWARD, PLATFORM_STANDARD};
+
 #[derive(Debug, Clone, Default)]
 pub struct SubscriptionState {
     /// mint → bonding_curve or AMM pool PDA (tx filter include).
@@ -20,6 +23,8 @@ pub struct SubscriptionState {
     pub wallet_pubkeys: Vec<Pubkey>,
     /// Target / gate wallets in the tx filter.
     pub target_wallets: Vec<Pubkey>,
+    /// Pump.fun plus the two Stonk.fun platforms, for v071 age and volume.
+    pub pump_firehose: bool,
 }
 
 pub fn build_request(state: &SubscriptionState) -> SubscribeRequest {
@@ -39,6 +44,21 @@ pub fn build_request(state: &SubscriptionState) -> SubscribeRequest {
                 vote: Some(false),
                 failed: Some(false),
                 account_include,
+                ..Default::default()
+            },
+        );
+    }
+    if state.pump_firehose {
+        transactions.insert(
+            "pump_firehose".to_string(),
+            SubscribeRequestFilterTransactions {
+                vote: Some(false),
+                failed: Some(false),
+                account_include: vec![
+                    PUMP_PROGRAM.to_string(),
+                    PLATFORM_REWARD.to_string(),
+                    PLATFORM_STANDARD.to_string(),
+                ],
                 ..Default::default()
             },
         );

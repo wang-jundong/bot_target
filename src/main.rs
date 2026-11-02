@@ -1,14 +1,16 @@
 use bot_target::alt_quote::AltQuote;
-use bot_target::config::load_config;
+use bot_target::config::{StrategyName, load_config};
 use bot_target::execution::{BlockhashCache, LiveExecution};
 use bot_target::geyser::{self, GeyserHandle};
 use bot_target::helius::HeliusSender;
 use bot_target::journal::{PnlJournal, RecoveryJournal};
 use bot_target::runtime::TradingRuntime;
+use bot_target::strategy::v071_tape::V071Tape;
 use bot_target::venues::Venues;
 use solana_sdk::signer::Signer;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
@@ -129,6 +131,15 @@ async fn main() -> anyhow::Result<()> {
                     max_entry_s = c.max_entry_s,
                     min_mc_sol = c.min_mc_sol,
                     max_mc_sol = c.max_mc_sol,
+                    buy_pressure_s = c.buy_pressure_s,
+                    min_buy_pressure = c.min_buy_pressure,
+                    max_buy_pressure = c.max_buy_pressure,
+                    target_volume_s = c.target_volume_s,
+                    min_target_volume_sol = c.min_target_volume_sol,
+                    max_target_volume_sol = c.max_target_volume_sol,
+                    min_target_age_s = c.min_target_age_s,
+                    max_target_age_s = c.max_target_age_s,
+                    partial_sell_skip = c.partial_sell_skip,
                     sell_hit_count = c.sell_hit_count,
                     sell_hit_min = c.sell_hit_min,
                     take_profit = c.take_profit,
@@ -325,9 +336,26 @@ async fn main() -> anyhow::Result<()> {
     let geyser = GeyserHandle {
         commands: commands_tx,
     };
+    let v071_live = config
+        .strategy_plans
+        .iter()
+        .any(|plan| plan.name == StrategyName::V071);
+    let v071_cfg = &config.strategy_v071;
+    let birth_keep = Duration::from_secs_f64(
+        (v071_cfg
+            .max_target_age_s
+            .max(v071_cfg.min_target_age_s)
+            .max(0.0)
+            + v071_cfg.max_entry_s.max(0.0)
+            + 60.0)
+            .max(120.0),
+    );
+    let tape = v071_live.then(|| Arc::new(V071Tape::new(birth_keep)));
+    let tape_keep = Duration::from_secs_f64((v071_cfg.target_volume_s.max(1.0) + 30.0).max(10.0));
     let endpoint = config.vibe_grpc_endpoint.clone();
     let token = config.vibe_grpc_token.clone();
     let venues_geyser = Arc::clone(&venues);
+    let tape_for_stream = tape.clone();
     tokio::spawn(async move {
         if let Err(err) = geyser::run(
             endpoint,
@@ -337,6 +365,8 @@ async fn main() -> anyhow::Result<()> {
             venues_geyser,
             inbound_tx,
             commands_rx,
+            tape_for_stream,
+            tape_keep,
         )
         .await
         {
@@ -350,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
         geyser,
         journal,
         quotes,
+        tape,
         executions,
         inbound_rx,
     );

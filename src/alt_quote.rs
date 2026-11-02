@@ -152,6 +152,13 @@ impl AltQuote {
         Ok(true)
     }
 
+    /// Quote atoms as SOL, using the cached Jupiter rate or fetching one.
+    pub async fn quote_atoms_to_sol(&self, quote_mint: &Pubkey, atoms: u64) -> Result<f64> {
+        let meta = self.ensure_meta(quote_mint).await?;
+        let fx = self.sol_per_quote(quote_mint).await?;
+        Ok(lamports_from_quote_atoms(atoms, fx, meta.decimals) as f64 / 1_000_000_000.0)
+    }
+
     pub async fn quote_fill_to_sol(
         &self,
         quote_mint: &Pubkey,

@@ -32,9 +32,26 @@ const FEE_RATE_DENOMINATOR: u64 = 1_000_000;
 pub const DEFAULT_TRADE_FEE_RATE: u64 = 10_000;
 
 pub const IX_POOL_ACCOUNT_INDEX: usize = 4;
+pub const IX_VAULT_B_ACCOUNT_INDEX: usize = 8;
 pub const IX_MINT_A_ACCOUNT_INDEX: usize = 9;
 pub const IX_MINT_B_ACCOUNT_INDEX: usize = 10;
 const POOL_MINT_B_OFFSET: usize = 237;
+
+/// Quote atoms of one LaunchLab print.
+///
+/// A buy uses `amount_in`. Wrapping SOL in the same transaction leaves the
+/// trader's quote balance unchanged, so the wallet delta is not the trade.
+/// A sell uses the trader's quote gain, or the quote vault's drop when that
+/// gain was unwrapped in the same transaction.
+pub fn quote_print_atoms(is_buy: bool, amount_in: u64, user_delta: u64, vault_out: u64) -> u64 {
+    if is_buy {
+        if amount_in > 0 { amount_in } else { user_delta }
+    } else if user_delta > 0 {
+        user_delta
+    } else {
+        vault_out
+    }
+}
 
 pub fn is_stonk_platform(platform_id: &Pubkey) -> bool {
     *platform_id == *PLATFORM_REWARD || *platform_id == *PLATFORM_STANDARD
@@ -196,8 +213,16 @@ fn launchpad_accounts(
         meta(event_authority_pda(), false, false),
         meta(*PROGRAM_ID, false, false),
         meta(system_program::id(), false, false),
-        meta(platform_fee_vault_pda(&pool.platform_id, &pool.mint_b), true, false),
-        meta(creator_fee_vault_pda(&pool.creator, &pool.mint_b), true, false),
+        meta(
+            platform_fee_vault_pda(&pool.platform_id, &pool.mint_b),
+            true,
+            false,
+        ),
+        meta(
+            creator_fee_vault_pda(&pool.creator, &pool.mint_b),
+            true,
+            false,
+        ),
     ]
 }
 
@@ -255,7 +280,11 @@ pub fn sol_buy_instructions(
         bail!("launchlab buy missing");
     };
     let user_quote = ata(owner, &pool.mint_b, quote_program);
-    ixs.push(system_instruction::transfer(owner, &user_quote, spend_lamports));
+    ixs.push(system_instruction::transfer(
+        owner,
+        &user_quote,
+        spend_lamports,
+    ));
     ixs.push(Instruction {
         program_id: *quote_program,
         accounts: vec![meta(user_quote, true, false)],
@@ -295,7 +324,9 @@ pub fn trade_from_ix(
     ix: &crate::events::CompiledIx,
 ) -> Option<LaunchpadTrade> {
     let program = account_keys.get(ix.program_id_index)?;
-    if program != PROGRAM_ID_STR || ix.data.len() < 24 || ix.accounts.len() <= IX_MINT_B_ACCOUNT_INDEX
+    if program != PROGRAM_ID_STR
+        || ix.data.len() < 24
+        || ix.accounts.len() <= IX_MINT_B_ACCOUNT_INDEX
     {
         return None;
     }
@@ -315,6 +346,7 @@ pub fn trade_from_ix(
         is_buy: side,
         trader: key(0)?,
         pool: key(IX_POOL_ACCOUNT_INDEX)?,
+        vault_b: key(IX_VAULT_B_ACCOUNT_INDEX)?,
         mint_a: key(IX_MINT_A_ACCOUNT_INDEX)?,
         mint_b: key(IX_MINT_B_ACCOUNT_INDEX)?,
         amount_in: u64::from_le_bytes(ix.data[8..16].try_into().ok()?),
@@ -339,12 +371,23 @@ mod tests {
         assert_eq!(parsed.mint_b, mint_b);
         assert_eq!(parsed.pool, pool);
     }
+
+    #[test]
+    fn wrapped_sol_buy_uses_the_instruction_amount() {
+        assert_eq!(quote_print_atoms(true, 1_000_000_000, 0, 0), 1_000_000_000);
+        assert_eq!(quote_print_atoms(false, 0, 0, 400_000_000), 400_000_000);
+        assert_eq!(
+            quote_print_atoms(false, 0, 250_000_000, 400_000_000),
+            250_000_000
+        );
+    }
 }
 
 pub struct LaunchpadTrade {
     pub is_buy: bool,
     pub trader: String,
     pub pool: String,
+    pub vault_b: String,
     pub mint_a: String,
     pub mint_b: String,
     pub amount_in: u64,

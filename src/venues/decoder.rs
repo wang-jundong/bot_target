@@ -117,20 +117,30 @@ pub fn decode(tx: &ParsedTargetTransaction) -> Vec<ParsedTrade> {
         let Some(hit) = super::launchpad::trade_from_ix(&tx.account_keys, ix) else {
             continue;
         };
-        if trades.iter().any(|trade| {
-            trade.descriptor.mint == hit.mint_a && trade.event.trader == hit.trader
-        }) {
+        if trades
+            .iter()
+            .any(|trade| trade.descriptor.mint == hit.mint_a && trade.event.trader == hit.trader)
+        {
             continue;
         }
         let pre_base = balance_of(&tx.pre_token_balances, &hit.trader, &hit.mint_a);
         let post_base = balance_of(&tx.post_token_balances, &hit.trader, &hit.mint_a);
         let pre_quote = balance_of(&tx.pre_token_balances, &hit.trader, &hit.mint_b);
         let post_quote = balance_of(&tx.post_token_balances, &hit.trader, &hit.mint_b);
-        let (quote_atoms, token_amount) = if hit.is_buy {
-            (pre_quote.saturating_sub(post_quote), post_base.saturating_sub(pre_base))
+        let (user_quote, token_amount) = if hit.is_buy {
+            (
+                pre_quote.saturating_sub(post_quote),
+                post_base.saturating_sub(pre_base),
+            )
         } else {
-            (post_quote.saturating_sub(pre_quote), pre_base.saturating_sub(post_base))
+            (
+                post_quote.saturating_sub(pre_quote),
+                pre_base.saturating_sub(post_base),
+            )
         };
+        let vault_out = vault_quote_out(tx, &hit.vault_b, &hit.mint_b);
+        let quote_atoms =
+            super::launchpad::quote_print_atoms(hit.is_buy, hit.amount_in, user_quote, vault_out);
         if token_amount == 0 {
             continue;
         }
@@ -415,6 +425,20 @@ fn tx_has_stonk_platform(keys: &[String]) -> bool {
             .ok()
             .is_some_and(|pubkey| super::launchpad::is_stonk_platform(&pubkey))
     })
+}
+
+fn vault_quote_out(tx: &ParsedTargetTransaction, vault: &str, quote_mint: &str) -> u64 {
+    let Some(index) = tx.account_keys.iter().position(|key| key == vault) else {
+        return 0;
+    };
+    let amount = |balances: &[TokenBalanceInfo]| {
+        balances
+            .iter()
+            .filter(|balance| balance.account_index == index && balance.mint == quote_mint)
+            .map(|balance| balance.amount)
+            .sum::<u64>()
+    };
+    amount(&tx.pre_token_balances).saturating_sub(amount(&tx.post_token_balances))
 }
 
 fn balance_of(balances: &[TokenBalanceInfo], owner: &str, mint: &str) -> u64 {

@@ -328,6 +328,15 @@ pub struct StrategyV071Config {
     pub max_entry_s: f64,
     pub min_mc_sol: f64,
     pub max_mc_sol: f64,
+    pub buy_pressure_s: f64,
+    pub min_buy_pressure: f64,
+    pub max_buy_pressure: f64,
+    pub target_volume_s: f64,
+    pub min_target_volume_sol: f64,
+    pub max_target_volume_sol: f64,
+    pub min_target_age_s: f64,
+    pub max_target_age_s: f64,
+    pub partial_sell_skip: bool,
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
@@ -340,10 +349,16 @@ pub struct StrategyV071Config {
 }
 
 impl StrategyV071Config {
-    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-10-26 update).
-    /// The entry clock is 3s through 90s. `min_mc_sol` is 0, so only the 70 SOL
-    /// cap applies. Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
-    /// and `max_hold_s` disable those bounds. `size_sol` is the live position size.
+    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-11-02 update).
+    /// The entry clock is 3s through 90s. Market cap is off. Buy pressure is off.
+    /// Target-buy volume is the 5s window up to that buy, from 3 SOL through 13 SOL.
+    /// Target-buy age is 30s through 300s from the mint's first print.
+    /// `partial_sell_skip` is on. Sell is 6 buys summing to at least 14 SOL.
+    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
+    /// `buy_pressure_s`, `max_buy_pressure`, `target_volume_s`,
+    /// `min_target_volume_sol`, `max_target_volume_sol`, `min_target_age_s`,
+    /// `max_target_age_s`, and `max_hold_s` disable those bounds.
+    /// `size_sol` is the live position size.
     pub fn default_v071() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
@@ -351,19 +366,46 @@ impl StrategyV071Config {
             min_entry_s: 3.0,
             max_entry_s: 90.0,
             min_mc_sol: 0.0,
-            max_mc_sol: 70.0,
-            sell_hit_count: 5,
-            sell_hit_min: 8.0,
+            max_mc_sol: 0.0,
+            buy_pressure_s: 0.0,
+            min_buy_pressure: 0.0,
+            max_buy_pressure: 0.0,
+            target_volume_s: 5.0,
+            min_target_volume_sol: 3.0,
+            max_target_volume_sol: 13.0,
+            min_target_age_s: 30.0,
+            max_target_age_s: 300.0,
+            partial_sell_skip: true,
+            sell_hit_count: 6,
+            sell_hit_min: 14.0,
             take_profit: 1.2,
             max_hold_s: 0.0,
             target_sell_exit: true,
             second_buy_exit: false,
             first_cycle_only: false,
-            repeat_entries: true,
-            size_sol: 0.5,
+            repeat_entries: false,
+            size_sol: 0.3,
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
+        }
+        if cfg.max_buy_pressure < 0.0 {
+            cfg.max_buy_pressure = 0.0;
+        }
+        if cfg.target_volume_s < 0.0 {
+            cfg.target_volume_s = 0.0;
+        }
+        if cfg.min_target_volume_sol < 0.0 {
+            cfg.min_target_volume_sol = 0.0;
+        }
+        if cfg.max_target_volume_sol < 0.0 {
+            cfg.max_target_volume_sol = 0.0;
+        }
+        if cfg.min_target_age_s < 0.0 {
+            cfg.min_target_age_s = 0.0;
+        }
+        if cfg.max_target_age_s < 0.0 {
+            cfg.max_target_age_s = 0.0;
         }
         cfg
     }

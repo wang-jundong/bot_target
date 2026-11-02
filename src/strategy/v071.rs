@@ -1,11 +1,15 @@
-//! strategy_v_071 — clock entry inside a market-cap band, then a buy-run exit.
+//! strategy_v_071 — clock entry, then a buy-run exit.
 //!
 //! Same flow as scalpingbot `strategy_v_071.py`, for
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
-//! Knobs from `config/strategy_v_071.json` (2026-10-26).
-//! A `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, or `max_hold_s`
-//! of 0 disables that bound. Max sell is 80% of the bag.
-//! One instance per mint.
+//! Knobs from `config/strategy_v_071.json` (2026-11-02).
+//! Age and volume match scalpingbot `strategy_v_071.py`. Volume is buy SOL
+//! plus sell SOL over the last `target_volume_s` up to and including the buy
+//! that opened the cycle. Age is seconds from the mint's first print to that
+//! buy. No earlier print makes the age 0. A value equal to a bound still
+//! buys. A zero clock, market-cap, pressure, volume, age, or hold
+//! bound disables that gate. Max sell is 80% of the bag. A partial sell is a
+//! target sell under that line. One instance per mint.
 
 use crate::config::StrategyV071Config;
 use crate::strategy::common::{
@@ -44,6 +48,15 @@ struct FlowState {
     diag: BuyDiag,
     opened_at: Option<ChainCursor>,
     closed_at: Option<ChainCursor>,
+    /// `(timestamp_ms, side, sol)` inside the buy-pressure window.
+    pressure: Vec<(u64, u8, f64)>,
+    /// Pre-open curve SOL frozen at cycle open. Zero when the volume band was skipped.
+    target_volume: f64,
+    /// Seconds since the pump create we saw. Zero when that create was missing.
+    target_age_s: f64,
+    partial_sell: bool,
+    tape_ready: bool,
+    tape_blocked: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -52,6 +65,10 @@ pub struct BuyDiag {
     pub end_ret: f64,
     pub mcap: f64,
     pub buy_hit_sol: f64,
+    pub buy_pressure: Option<f64>,
+    pub target_volume: f64,
+    pub target_age_s: f64,
+    pub partial_sell: bool,
 }
 
 fn fresh_state() -> FlowState {
@@ -73,6 +90,12 @@ fn fresh_state() -> FlowState {
         diag: BuyDiag::default(),
         opened_at: None,
         closed_at: None,
+        pressure: Vec::new(),
+        target_volume: 0.0,
+        target_age_s: 0.0,
+        partial_sell: false,
+        tape_ready: false,
+        tape_blocked: false,
     }
 }
 
@@ -93,6 +116,8 @@ pub struct StrategyV071Engine {
     last_px: f64,
     exit_retry: bool,
     exit_retry_at_ms: u64,
+    /// `(volume, age)` for the next cycle open. Volume `None` skips that band.
+    pending_tape: Option<(Option<f64>, Option<f64>)>,
 }
 
 impl StrategyV071Engine {
@@ -109,6 +134,7 @@ impl StrategyV071Engine {
             last_px: 0.0,
             exit_retry: false,
             exit_retry_at_ms: 0,
+            pending_tape: None,
         };
         engine.st.phase = PHASE_IDLE;
         engine
@@ -179,6 +205,15 @@ impl StrategyV071Engine {
         self.buy_diag = BuyDiag::default();
         self.exit_retry = false;
         self.exit_retry_at_ms = 0;
+        self.note_pressure(SIDE_BUY, sol);
+        self.take_open_tape();
+    }
+
+    /// Print-tape numbers for the cycle that is about to open.
+    /// `None` is 0, the same as a mint whose first print is this buy.
+    /// A non-finite volume or age blocks the cycle when that gate is on.
+    pub fn set_open_tape(&mut self, volume: Option<f64>, age_sec: Option<f64>) {
+        self.pending_tape = Some((volume, age_sec));
     }
 
     pub fn on_buy_fill(&mut self, fill_px: f64, held_since_ms: u64) {
@@ -291,6 +326,7 @@ impl StrategyV071Engine {
             event.timestamp_ms,
             cursor_of(event),
         );
+        self.pending_tape = None;
         self.note_signal(signal)
     }
 
@@ -361,8 +397,91 @@ impl StrategyV071Engine {
         clear_streak(&mut self.st);
     }
 
+    fn take_open_tape(&mut self) {
+        let Some((volume, age)) = self.pending_tape.take() else {
+            self.st.tape_ready = false;
+            self.st.tape_blocked = self.volume_gate_on() || self.age_gate_on();
+            self.st.target_volume = 0.0;
+            self.st.target_age_s = 0.0;
+            return;
+        };
+        self.st.tape_ready = true;
+        let vol = volume.unwrap_or(0.0);
+        let age_sec = age.unwrap_or(0.0);
+        let vol_known = vol.is_finite() && vol >= 0.0;
+        let age_known = age_sec.is_finite() && age_sec >= 0.0;
+        self.st.target_volume = if vol_known { vol } else { 0.0 };
+        self.st.target_age_s = if age_known { age_sec } else { 0.0 };
+        let mut blocked = false;
+        if self.volume_gate_on()
+            && (!vol_known
+                || (self.cfg.min_target_volume_sol > 0.0 && vol < self.cfg.min_target_volume_sol)
+                || (self.cfg.max_target_volume_sol > 0.0 && vol > self.cfg.max_target_volume_sol))
+        {
+            blocked = true;
+        }
+        if self.age_gate_on()
+            && (!age_known
+                || (self.cfg.min_target_age_s > 0.0 && age_sec < self.cfg.min_target_age_s)
+                || (self.cfg.max_target_age_s > 0.0 && age_sec > self.cfg.max_target_age_s))
+        {
+            blocked = true;
+        }
+        self.st.tape_blocked = blocked;
+    }
+
+    fn note_pressure(&mut self, side: u8, sol: f64) {
+        if self.cfg.buy_pressure_s <= 0.0 {
+            self.st.pressure.clear();
+            return;
+        }
+        if (side == SIDE_BUY || side == SIDE_SELL) && sol > 0.0 {
+            self.st.pressure.push((self.st.now_ms, side, sol));
+        }
+        let span = self.cfg.buy_pressure_s * 1000.0;
+        let now = self.st.now_ms;
+        let drop = self
+            .st
+            .pressure
+            .iter()
+            .position(|(ts, _, _)| now.saturating_sub(*ts) as f64 <= span)
+            .unwrap_or(self.st.pressure.len());
+        if drop > 0 {
+            self.st.pressure.drain(0..drop);
+        }
+    }
+
+    fn volume_gate_on(&self) -> bool {
+        self.cfg.target_volume_s > 0.0
+            && (self.cfg.min_target_volume_sol > 0.0 || self.cfg.max_target_volume_sol > 0.0)
+    }
+
+    fn age_gate_on(&self) -> bool {
+        self.cfg.min_target_age_s > 0.0 || self.cfg.max_target_age_s > 0.0
+    }
+
+    fn buy_pressure(&self) -> Option<f64> {
+        let mut buys = 0.0;
+        let mut sells = 0.0;
+        for (_, side, sol) in &self.st.pressure {
+            if *side == SIDE_BUY {
+                buys += sol;
+            } else if *side == SIDE_SELL {
+                sells += sol;
+            }
+        }
+        let total = buys + sells;
+        if total <= 0.0 {
+            return None;
+        }
+        Some((buys - sells) / total)
+    }
+
     fn clock_entry(&mut self, px: f64) -> Option<&'static str> {
-        if self.st.phase != PHASE_SEEK_SELL || px <= 0.0 {
+        if self.st.phase != PHASE_SEEK_SELL || px <= 0.0 || self.st.tape_blocked {
+            return None;
+        }
+        if (self.volume_gate_on() || self.age_gate_on()) && !self.st.tape_ready {
             return None;
         }
         let age = self.age_s(self.st.now_ms);
@@ -384,6 +503,25 @@ impl StrategyV071Engine {
         {
             return None;
         }
+        let pressure = if self.cfg.buy_pressure_s > 0.0 {
+            self.buy_pressure()
+        } else {
+            None
+        };
+        if self.cfg.buy_pressure_s > 0.0
+            && (pressure.is_none() || pressure.unwrap_or(0.0) < self.cfg.min_buy_pressure)
+        {
+            return None;
+        }
+        if self.cfg.buy_pressure_s > 0.0
+            && self.cfg.max_buy_pressure > 0.0
+            && pressure.is_some_and(|score| score > self.cfg.max_buy_pressure)
+        {
+            return None;
+        }
+        if self.cfg.partial_sell_skip && self.st.partial_sell {
+            return None;
+        }
         self.st.hit_sol = 0.0;
         self.st.phase = PHASE_PENDING;
         self.st.why = "clock".to_string();
@@ -393,6 +531,10 @@ impl StrategyV071Engine {
             end_ret: round(chase, 4),
             mcap: round(mcap, 3),
             buy_hit_sol: 0.0,
+            buy_pressure: pressure.map(|score| round(score, 4)),
+            target_volume: round(self.st.target_volume, 4),
+            target_age_s: round(self.st.target_age_s, 3),
+            partial_sell: self.st.partial_sell,
         };
         clear_streak(&mut self.st);
         Some("BUY")
@@ -410,6 +552,7 @@ impl StrategyV071Engine {
         order: ChainCursor,
     ) -> Option<&'static str> {
         self.st.now_ms = now_ms;
+        self.note_pressure(side, sol);
         if is_target
             && side == SIDE_BUY
             && self
@@ -444,8 +587,17 @@ impl StrategyV071Engine {
             }
         }
 
+        let mut just_armed = false;
         if is_target && side == SIDE_SELL {
             let max_sell = is_max_sell(self.st.target_tokens, tokens);
+            if !max_sell
+                && tokens > 0.0
+                && self.st.t0_ms > 0
+                && !matches!(self.st.phase, PHASE_IDLE | PHASE_DONE)
+            {
+                just_armed = !self.st.partial_sell;
+                self.st.partial_sell = true;
+            }
             self.st.target_tokens = (self.st.target_tokens - tokens.max(0.0)).max(0.0);
             if max_sell && self.st.phase != PHASE_DONE {
                 if self
@@ -476,6 +628,8 @@ impl StrategyV071Engine {
             self.st.px0 = px;
             self.st.target_buys = if sol > 0.0 { 1 } else { 0 };
             self.st.second_buy_seen = false;
+            self.st.partial_sell = false;
+            self.take_open_tape();
             clear_streak(&mut self.st);
             return None;
         }
@@ -489,7 +643,15 @@ impl StrategyV071Engine {
         }
 
         if self.st.phase == PHASE_SEEK_SELL {
-            return self.clock_entry(px);
+            // This print can be the partial sell and still buy. Later prints see the flag.
+            if just_armed {
+                self.st.partial_sell = false;
+            }
+            let signal = self.clock_entry(px);
+            if just_armed {
+                self.st.partial_sell = true;
+            }
+            return signal;
         }
 
         if is_own {
@@ -601,6 +763,7 @@ mod tests {
 
     fn bound(overrides: impl FnOnce(&mut StrategyV071Config), own: &str) -> StrategyV071Engine {
         let mut engine = StrategyV071Engine::new(cfg(overrides), own);
+        engine.set_open_tape(Some(5.0), Some(60.0));
         engine.bind_gate("target", 1_000.0, 50e-9, 1.0, T0);
         engine
     }
@@ -638,16 +801,25 @@ mod tests {
         assert_eq!(loaded.min_entry_s, 3.0);
         assert_eq!(loaded.max_entry_s, 90.0);
         assert_eq!(loaded.min_mc_sol, 0.0);
-        assert_eq!(loaded.max_mc_sol, 70.0);
-        assert_eq!(loaded.sell_hit_count, 5);
-        assert_eq!(loaded.sell_hit_min, 8.0);
+        assert_eq!(loaded.max_mc_sol, 0.0);
+        assert_eq!(loaded.buy_pressure_s, 0.0);
+        assert_eq!(loaded.min_buy_pressure, 0.0);
+        assert_eq!(loaded.max_buy_pressure, 0.0);
+        assert_eq!(loaded.target_volume_s, 5.0);
+        assert_eq!(loaded.min_target_volume_sol, 3.0);
+        assert_eq!(loaded.max_target_volume_sol, 13.0);
+        assert_eq!(loaded.min_target_age_s, 30.0);
+        assert_eq!(loaded.max_target_age_s, 300.0);
+        assert!(loaded.partial_sell_skip);
+        assert_eq!(loaded.sell_hit_count, 6);
+        assert_eq!(loaded.sell_hit_min, 14.0);
         assert_eq!(loaded.take_profit, 1.2);
         assert_eq!(loaded.max_hold_s, 0.0);
         assert!(!loaded.first_cycle_only);
         assert!(loaded.target_sell_exit);
         assert!(!loaded.second_buy_exit);
-        assert!(loaded.repeat_entries);
-        assert_eq!(loaded.size_sol, 0.5);
+        assert!(!loaded.repeat_entries);
+        assert_eq!(loaded.size_sol, 0.3);
     }
 
     #[test]
@@ -663,18 +835,26 @@ mod tests {
 
         let mut rich = print("BUY", 1.0, "rich", T0 + 3_000);
         rich.price = 71e-9;
-        assert_eq!(engine.on_event(&rich), None);
-        assert_eq!(engine.phase_name(), "seek_sell");
+        assert_eq!(engine.on_event(&rich), Some("BUY"));
+        assert_eq!(engine.phase_name(), "pending");
+        assert_eq!(engine.last_buy_diag().mcap, 71.0);
+        assert_eq!(engine.last_buy_diag().target_volume, 5.0);
+        assert_eq!(engine.last_buy_diag().target_age_s, 60.0);
+        assert!(!engine.last_buy_diag().partial_sell);
 
+        let mut capped = bound(|cfg| cfg.max_mc_sol = 70.0, "");
+        let mut over = print("BUY", 1.0, "over-cap", T0 + 3_000);
+        over.price = 71e-9;
+        assert_eq!(capped.on_event(&over), None);
+        assert_eq!(capped.phase_name(), "seek_sell");
         let mut cheap = print("BUY", 1.0, "cheap", T0 + 4_000);
         cheap.price = 24e-9;
-        assert_eq!(engine.on_event(&cheap), Some("BUY"));
-        assert_eq!(engine.phase_name(), "pending");
-        assert_eq!(engine.last_buy_reason(), "clock");
-        assert_eq!(engine.last_buy_diag().wall_s, 4.0);
-        assert_eq!(engine.last_buy_diag().mcap, 24.0);
-        assert_eq!(engine.last_buy_diag().end_ret, -0.52);
-        assert_eq!(engine.last_buy_diag().buy_hit_sol, 0.0);
+        assert_eq!(capped.on_event(&cheap), Some("BUY"));
+        assert_eq!(capped.last_buy_reason(), "clock");
+        assert_eq!(capped.last_buy_diag().wall_s, 4.0);
+        assert_eq!(capped.last_buy_diag().mcap, 24.0);
+        assert_eq!(capped.last_buy_diag().end_ret, -0.52);
+        assert_eq!(capped.last_buy_diag().buy_hit_sol, 0.0);
 
         let mut floored = bound(|cfg| cfg.min_mc_sol = 25.0, "");
         let mut under = print("BUY", 1.0, "under-floor", T0 + 3_000);
@@ -724,7 +904,7 @@ mod tests {
         assert_eq!(cluster.phase_name(), "hold");
         for i in 0..5 {
             assert_eq!(
-                cluster.on_event(&print("BUY", 1.0, &format!("short-{i}"), T0 + 3_000)),
+                cluster.on_event(&print("BUY", 2.0, &format!("short-{i}"), T0 + 3_000)),
                 None
             );
         }
@@ -790,9 +970,9 @@ mod tests {
         let mut engine = bound(|cfg| cfg.take_profit = 0.0, "me");
         arm(&mut engine);
         engine.on_buy_fill(50e-9, T0 + 2_000);
-        for i in 0..4 {
+        for i in 0..5 {
             assert_eq!(
-                engine.on_event(&print("BUY", 2.0, &format!("b-{i}"), T0 + 3_000)),
+                engine.on_event(&print("BUY", 3.0, &format!("b-{i}"), T0 + 3_000)),
                 None
             );
         }
@@ -801,7 +981,7 @@ mod tests {
         assert_eq!(engine.on_event(&own), None);
         assert_eq!(engine.phase_name(), "hold");
         assert_eq!(
-            engine.on_event(&print("BUY", 2.0, "fifth", T0 + 5_000)),
+            engine.on_event(&print("BUY", 3.0, "sixth", T0 + 5_000)),
             Some("SELL")
         );
     }
@@ -840,6 +1020,7 @@ mod tests {
             None
         );
         assert_eq!(engine.phase_name(), "idle");
+        engine.set_open_tape(Some(5.0), Some(60.0));
         assert_eq!(
             engine.on_event(&target_trade("BUY", 1.0, 1_000.0, "next", T0 + 7_000, 5)),
             None
@@ -867,7 +1048,7 @@ mod tests {
 
     #[test]
     fn repeat_entries_reseeks_until_the_clock_or_max_sell() {
-        let mut engine = bound(|_| {}, "");
+        let mut engine = bound(|cfg| cfg.repeat_entries = true, "");
         arm(&mut engine);
         engine.on_buy_fill(50e-9, T0 + 2_000);
         let mut tp = print("SELL", 0.05, "tp", T0 + 8_000);
@@ -880,7 +1061,7 @@ mod tests {
             Some("BUY")
         );
 
-        let mut late = bound(|_| {}, "");
+        let mut late = bound(|cfg| cfg.repeat_entries = true, "");
         arm(&mut late);
         late.on_buy_fill(50e-9, T0 + 2_000);
         let mut late_tp = print("SELL", 0.05, "late-tp", T0 + 90_001);
@@ -892,7 +1073,7 @@ mod tests {
 
     #[test]
     fn failed_buy_reseeks_on_the_same_clock() {
-        let mut engine = bound(|_| {}, "");
+        let mut engine = bound(|cfg| cfg.repeat_entries = true, "");
         arm(&mut engine);
         engine.on_buy_failed();
         assert_eq!(engine.phase_name(), "seek_sell");
@@ -928,14 +1109,14 @@ mod tests {
         let mut engine = bound(|cfg| cfg.take_profit = 0.0, "");
         arm(&mut engine);
         engine.on_buy_fill(50e-9, T0 + 2_000);
-        for i in 0..4 {
+        for i in 0..5 {
             assert_eq!(
-                engine.on_event(&print("BUY", 2.0, &format!("exit-{i}"), T0 + 3_000)),
+                engine.on_event(&print("BUY", 3.0, &format!("exit-{i}"), T0 + 3_000)),
                 None
             );
         }
         assert_eq!(
-            engine.on_event(&print("BUY", 2.0, "exit-4", T0 + 4_000)),
+            engine.on_event(&print("BUY", 3.0, "exit-5", T0 + 4_000)),
             Some("SELL")
         );
         engine.on_sell_failed(T0 + 4_000);
@@ -959,5 +1140,189 @@ mod tests {
         engine.apply_missed_target_sell();
         assert_eq!(engine.phase_name(), "idle");
         assert_eq!(engine.last_sell_reason(), "target_sell");
+    }
+
+    fn open_with(volume: Option<f64>, age: Option<f64>) -> StrategyV071Engine {
+        let mut engine = StrategyV071Engine::new(cfg(|_| {}), "");
+        engine.set_open_tape(volume, age);
+        engine.bind_gate("target", 1_000.0, 50e-9, 1.0, T0);
+        engine
+    }
+
+    #[test]
+    fn tape_volume_and_age_use_scalping_bounds() {
+        let mut unseeded = StrategyV071Engine::new(cfg(|_| {}), "");
+        unseeded.bind_gate("target", 1_000.0, 50e-9, 1.0, T0);
+        assert_eq!(
+            unseeded.on_event(&print("BUY", 1.0, "no-tape", T0 + 3_000)),
+            None
+        );
+        assert_eq!(unseeded.phase_name(), "seek_sell");
+
+        let mut low = open_with(Some(2.9), Some(60.0));
+        assert_eq!(low.on_event(&print("BUY", 1.0, "thin", T0 + 3_000)), None);
+
+        let mut floor = open_with(Some(3.0), Some(60.0));
+        assert_eq!(
+            floor.on_event(&print("BUY", 1.0, "floor", T0 + 3_000)),
+            Some("BUY")
+        );
+        assert_eq!(floor.last_buy_diag().target_volume, 3.0);
+
+        let mut cap = open_with(Some(13.0), Some(60.0));
+        assert_eq!(
+            cap.on_event(&print("BUY", 1.0, "cap", T0 + 3_000)),
+            Some("BUY")
+        );
+        assert_eq!(cap.last_buy_diag().target_volume, 13.0);
+
+        let mut fat = open_with(Some(13.1), Some(60.0));
+        assert_eq!(fat.on_event(&print("BUY", 1.0, "fat", T0 + 3_000)), None);
+
+        let mut young = open_with(Some(5.0), Some(29.0));
+        assert_eq!(
+            young.on_event(&print("BUY", 1.0, "young", T0 + 3_000)),
+            None
+        );
+        let mut age_floor = open_with(Some(5.0), Some(30.0));
+        assert_eq!(
+            age_floor.on_event(&print("BUY", 1.0, "age-floor", T0 + 3_000)),
+            Some("BUY")
+        );
+        assert_eq!(age_floor.last_buy_diag().target_age_s, 30.0);
+
+        let mut age_cap = open_with(Some(5.0), Some(300.0));
+        assert_eq!(
+            age_cap.on_event(&print("BUY", 1.0, "age-cap", T0 + 3_000)),
+            Some("BUY")
+        );
+        assert_eq!(age_cap.last_buy_diag().target_age_s, 300.0);
+        let mut old = open_with(Some(5.0), Some(301.0));
+        assert_eq!(old.on_event(&print("BUY", 1.0, "old", T0 + 3_000)), None);
+
+        let mut missing = open_with(Some(5.0), None);
+        assert_eq!(
+            missing.on_event(&print("BUY", 1.0, "no-earlier-print", T0 + 3_000)),
+            None
+        );
+
+        let mut empty = open_with(None, Some(60.0));
+        assert_eq!(
+            empty.on_event(&print("BUY", 1.0, "no-volume", T0 + 3_000)),
+            None
+        );
+
+        let mut unpriced = open_with(Some(f64::NAN), Some(60.0));
+        assert_eq!(
+            unpriced.on_event(&print("BUY", 1.0, "unpriced", T0 + 3_000)),
+            None
+        );
+        assert_eq!(unpriced.phase_name(), "seek_sell");
+
+        let mut forgotten = open_with(Some(5.0), Some(f64::NAN));
+        assert_eq!(
+            forgotten.on_event(&print("BUY", 1.0, "forgotten-birth", T0 + 3_000)),
+            None
+        );
+    }
+
+    #[test]
+    fn partial_sell_skips_later_prints_but_not_that_print() {
+        let mut same = bound(|_| {}, "");
+        assert_eq!(
+            same.on_event(&target_trade(
+                "SELL",
+                0.2,
+                100.0,
+                "partial-now",
+                T0 + 3_000,
+                2
+            )),
+            Some("BUY")
+        );
+        assert!(!same.last_buy_diag().partial_sell);
+
+        let mut later = bound(|_| {}, "");
+        assert_eq!(
+            later.on_event(&target_trade(
+                "SELL",
+                0.2,
+                100.0,
+                "partial-early",
+                T0 + 2_000,
+                2
+            )),
+            None
+        );
+        assert_eq!(
+            later.on_event(&print("BUY", 1.0, "after-partial", T0 + 3_000)),
+            None
+        );
+        assert_eq!(later.phase_name(), "seek_sell");
+        assert_eq!(
+            later.on_event(&target_trade("SELL", 1.0, 900.0, "flat", T0 + 4_000, 3)),
+            None
+        );
+        assert_eq!(later.phase_name(), "idle");
+
+        let mut kept = bound(|cfg| cfg.partial_sell_skip = false, "");
+        assert_eq!(
+            kept.on_event(&target_trade("SELL", 0.2, 100.0, "keep", T0 + 2_000, 2)),
+            None
+        );
+        assert_eq!(
+            kept.on_event(&print("BUY", 1.0, "still-buys", T0 + 3_000)),
+            Some("BUY")
+        );
+    }
+
+    #[test]
+    fn buy_pressure_skips_until_the_score_is_inside_the_band() {
+        let mut engine = bound(
+            |cfg| {
+                cfg.buy_pressure_s = 5.0;
+                cfg.min_buy_pressure = 0.2;
+                cfg.max_buy_pressure = 0.6;
+            },
+            "",
+        );
+        assert_eq!(
+            engine.on_event(&print("SELL", 1.0, "heavy-sell", T0 + 1_000)),
+            None
+        );
+        let flat = print("BUY", 0.0, "flat", T0 + 3_000);
+        assert_eq!(engine.on_event(&flat), None);
+        assert_eq!(
+            engine.on_event(&print("BUY", 2.0, "pressure", T0 + 3_500)),
+            Some("BUY")
+        );
+        let score = engine.last_buy_diag().buy_pressure.unwrap();
+        assert!((score - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn next_cycle_uses_the_tape_from_that_open() {
+        let mut engine = bound(|cfg| cfg.take_profit = 0.0, "");
+        assert_eq!(
+            engine.on_event(&target_trade("SELL", 1.0, 1_000.0, "flat", T0 + 1_000, 2)),
+            None
+        );
+        assert_eq!(engine.phase_name(), "idle");
+        assert_eq!(
+            engine.on_event(&print("BUY", 9.0, "burst", T0 + 9_000)),
+            None
+        );
+        engine.set_open_tape(Some(4.0), Some(40.0));
+        assert_eq!(
+            engine.on_event(&target_trade("BUY", 1.0, 1_000.0, "again", T0 + 10_000, 3)),
+            None
+        );
+        assert_eq!(engine.phase_name(), "seek_sell");
+        assert_eq!(
+            engine.on_event(&print("BUY", 0.2, "enter", T0 + 13_000)),
+            Some("BUY")
+        );
+        assert_eq!(engine.last_buy_diag().target_volume, 4.0);
+        assert_eq!(engine.last_buy_diag().target_age_s, 40.0);
     }
 }

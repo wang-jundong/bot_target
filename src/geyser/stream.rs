@@ -6,7 +6,7 @@
 //! those on an open socket even after it has stopped delivering trades, and
 //! treating them as liveness left the bot deaf for hours.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,12 +19,12 @@ use yellowstone_grpc_client::{ClientTlsConfig, GeyserGrpcClient};
 use yellowstone_grpc_proto::prelude::{SubscribeUpdate, subscribe_update::UpdateOneof};
 
 use crate::events::ParsedTargetTransaction;
+use crate::strategy::v071_tape::{self, V071Tape};
 use crate::venues::Venues;
 
 use super::parser::{
     account_data, account_pubkey, bonding_curve_from_account_data, curve_account_is_complete,
-    parse_transaction,
-    token_account_amount,
+    parse_transaction, token_account_amount,
 };
 use super::subscribe::{SubscriptionState, build_request};
 
@@ -75,6 +75,9 @@ struct PumpCtx {
     watched: HashMap<Pubkey, WatchedMint>,
     reserve_accounts: HashMap<Pubkey, ReserveAccountRef>,
     sub_state: SubscriptionState,
+    forward: HashSet<String>,
+    tape: Option<Arc<V071Tape>>,
+    tape_keep: Duration,
     dropped: u64,
 }
 
@@ -86,6 +89,8 @@ pub async fn run(
     venues: Arc<Venues>,
     outbound: mpsc::Sender<ParsedTargetTransaction>,
     mut commands: mpsc::Receiver<GeyserCommand>,
+    tape: Option<Arc<V071Tape>>,
+    tape_keep: Duration,
 ) -> Result<()> {
     let mut ctx = PumpCtx {
         venues,
@@ -95,10 +100,15 @@ pub async fn run(
         sub_state: SubscriptionState {
             wallet_pubkeys,
             target_wallets,
+            pump_firehose: tape.is_some(),
             ..Default::default()
         },
+        forward: HashSet::new(),
+        tape,
+        tape_keep,
         dropped: 0,
     };
+    rebuild_forward(&mut ctx);
 
     loop {
         match connect_and_pump(&endpoint, token.as_deref(), &mut ctx, &mut commands).await {
@@ -184,6 +194,7 @@ async fn connect_and_pump(
                             accounts.push(q);
                         }
                         ctx.sub_state.watched_accounts.insert(mint, accounts);
+                        rebuild_forward(ctx);
                         ctx.watched.insert(bonding_curve, WatchedMint::Curve { mint });
                         ctx.reserve_accounts.insert(bonding_curve, ReserveAccountRef::Curve { mint });
                         let req = build_request(&ctx.sub_state);
@@ -210,6 +221,7 @@ async fn connect_and_pump(
                             mint,
                             vec![pool_base_token_account, pool_quote_token_account],
                         );
+                        rebuild_forward(ctx);
                         ctx.watched.insert(pool, WatchedMint::Amm { mint });
                         ctx.reserve_accounts.insert(
                             pool_base_token_account,
@@ -234,6 +246,7 @@ async fn connect_and_pump(
                             }
                         }
                         ctx.sub_state.watched_pools.remove(&mint);
+                        rebuild_forward(ctx);
                         let req = build_request(&ctx.sub_state);
                         if let Err(e) = sink.send(req).await {
                             error!("failed to push updated geyser subscription for {mint}: {e}");
@@ -243,6 +256,7 @@ async fn connect_and_pump(
                     }
                     Some(GeyserCommand::SetTargetWallets { wallets }) => {
                         ctx.sub_state.target_wallets = wallets;
+                        rebuild_forward(ctx);
                         let req = build_request(&ctx.sub_state);
                         if let Err(e) = sink.send(req).await {
                             error!("failed to push target-wallet geyser subscription: {e}");
@@ -278,11 +292,39 @@ fn transaction_feed_expired(since_last_tx: Duration, is_transaction: bool) -> bo
     !is_transaction && since_last_tx >= IDLE
 }
 
+fn rebuild_forward(ctx: &mut PumpCtx) {
+    ctx.forward.clear();
+    for key in ctx
+        .sub_state
+        .wallet_pubkeys
+        .iter()
+        .chain(ctx.sub_state.target_wallets.iter())
+    {
+        ctx.forward.insert(key.to_string());
+    }
+    for pool in ctx.sub_state.watched_pools.values() {
+        ctx.forward.insert(pool.to_string());
+    }
+}
+
 fn handle_update(ctx: &mut PumpCtx, update: SubscribeUpdate) {
     match update.update_oneof {
         Some(UpdateOneof::Account(acc)) => handle_account_update(ctx, acc),
         Some(UpdateOneof::Transaction(tx)) => {
             if let Some(parsed) = parse_transaction(tx.slot, tx.transaction.as_ref()) {
+                if let Some(tape) = ctx.tape.as_ref() {
+                    v071_tape::observe(&parsed, tape, ctx.tape_keep);
+                    if !parsed
+                        .account_keys
+                        .iter()
+                        .any(|key| ctx.forward.contains(key))
+                    {
+                        return;
+                    }
+                }
+                if parsed.failed {
+                    return;
+                }
                 if ctx.outbound.try_send(parsed).is_err() {
                     ctx.dropped = ctx.dropped.saturating_add(1);
                     if ctx.dropped == 1 || ctx.dropped % 100 == 0 {

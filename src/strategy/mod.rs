@@ -6,6 +6,7 @@ pub mod v031;
 pub mod v051;
 pub mod v061;
 pub mod v071;
+pub mod v071_tape;
 pub mod v081;
 pub mod v101;
 pub mod v121;

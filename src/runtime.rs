@@ -9,12 +9,16 @@ use crate::journal::RecoveryJournal;
 use crate::state::{Lifecycle, TokenInner};
 use crate::strategy::engine::Engine;
 use crate::strategy::to_market_event;
+use crate::strategy::v071_tape::{BirthPage, V071Tape, absorb_birth_page};
 use crate::venues::decoder;
 use crate::venues::ids::ata;
 use anyhow::Result;
 use solana_account_decoder_client_types::UiAccountData;
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signature;
 use solana_sdk::signer::Signer;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -40,6 +44,10 @@ pub struct TradingRuntime {
     geyser: GeyserHandle,
     journal: Arc<RecoveryJournal>,
     quotes: Arc<AltQuote>,
+    /// Print tape for v071 age and volume. Present when v071 is running.
+    tape: Option<Arc<V071Tape>>,
+    /// Mint → unix time of the first confirmed pool trade.
+    births: Mutex<HashMap<Pubkey, i64>>,
     slots: Vec<Arc<StrategySlot>>,
     /// program:pool → (mint, set of slot names still needing the tape)
     registered: Mutex<HashMap<String, (Pubkey, HashSet<&'static str>)>>,
@@ -55,6 +63,7 @@ impl TradingRuntime {
         geyser: GeyserHandle,
         journal: Arc<RecoveryJournal>,
         quotes: Arc<AltQuote>,
+        tape: Option<Arc<V071Tape>>,
         executions: Vec<Arc<LiveExecution>>,
         inbound: mpsc::Receiver<crate::events::ParsedTargetTransaction>,
     ) -> Arc<Self> {
@@ -83,6 +92,8 @@ impl TradingRuntime {
             geyser,
             journal,
             quotes,
+            tape,
+            births: Mutex::new(HashMap::new()),
             slots,
             registered: Mutex::new(HashMap::new()),
             inbound: Mutex::new(Some(inbound)),
@@ -362,6 +373,7 @@ impl TradingRuntime {
                 );
             }
             let engine = self.make_engine(slot);
+            let tape_sample = self.v071_tape_sample(slot, event, descriptor).await;
             let token = Arc::new(Mutex::new(TokenInner::new(
                 descriptor.clone(),
                 event.clone(),
@@ -374,6 +386,9 @@ impl TradingRuntime {
                 state.prices.current_mark_price = Some(event.price);
                 let price = to_strategy_price(event.price);
                 let sol = lamports_to_sol(event.sol_amount);
+                if let Some((volume, age)) = tape_sample {
+                    state.engine.set_v071_open_tape(volume, age);
+                }
                 state.engine.bind_gate(
                     &slot.target_wallet,
                     event.token_amount as f64,
@@ -396,6 +411,22 @@ impl TradingRuntime {
         };
 
         let own_wallet = slot.execution.wallet.pubkey().to_string();
+        let tape_sample = if slot.name == StrategyName::V071 {
+            let prefetch = {
+                let state = token.lock().await;
+                let gate = event.signature == state.target_buy.signature
+                    && event.event_index == state.target_buy.event_index;
+                let target_buy = event.trader == slot.target_wallet && event.side == Side::Buy;
+                !gate && (!state.engine.is_bound() || target_buy)
+            };
+            if prefetch {
+                self.v071_tape_sample(slot, event, descriptor).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let (signal, buy_reason, sell_reason, needed, changed, strategy) = {
             let mut state = token.lock().await;
             if event.trader == own_wallet {
@@ -441,9 +472,17 @@ impl TradingRuntime {
                 let sol = lamports_to_sol(state.target_buy.sol_amount);
                 let gate_sig = state.target_buy.signature.clone();
                 let gate_ts = state.target_buy.timestamp_ms;
+                if let Some((volume, age)) = tape_sample {
+                    state.engine.set_v071_open_tape(volume, age);
+                }
                 state
                     .engine
                     .bind_gate(&slot.target_wallet, 0.0, price, sol, &gate_sig, gate_ts);
+            }
+            if event.trader == slot.target_wallet && event.side == Side::Buy {
+                if let Some((volume, age)) = tape_sample {
+                    state.engine.set_v071_open_tape(volume, age);
+                }
             }
             let before = state.engine.phase_name();
             let market = to_market_event(event);
@@ -502,6 +541,166 @@ impl TradingRuntime {
             StrategyName::V121 => Engine::new_v121(self.config.strategy_v121.clone(), own),
             StrategyName::V131 => Engine::new_v131(self.config.strategy_v131.clone(), own),
         }
+    }
+
+    /// Buy SOL plus sell SOL through this buy, and seconds since the first print.
+    /// Alt-quote atoms are converted with the Jupiter SOL rate before the band.
+    async fn v071_tape_sample(
+        &self,
+        slot: &StrategySlot,
+        event: &PoolTradeEvent,
+        _descriptor: &crate::events::PoolDescriptor,
+    ) -> Option<(Option<f64>, Option<f64>)> {
+        if slot.name != StrategyName::V071 {
+            return None;
+        }
+        let cfg = &self.config.strategy_v071;
+        let age_gate = cfg.min_target_age_s > 0.0 || cfg.max_target_age_s > 0.0;
+        let volume_gate = cfg.target_volume_s > 0.0
+            && (cfg.min_target_volume_sol > 0.0 || cfg.max_target_volume_sol > 0.0);
+        let Some(tape) = self.tape.as_ref() else {
+            return Some((None, None));
+        };
+        let Ok(mint) = event.mint.parse::<Pubkey>() else {
+            return Some((None, None));
+        };
+        let signature = event
+            .signature
+            .parse::<solana_sdk::signature::Signature>()
+            .ok();
+        let lookback = std::time::Duration::from_secs_f64(cfg.target_volume_s.max(0.0));
+        let (legs, unpriced, _) = tape.open_window(&mint, lookback, signature.as_ref());
+        let age = if age_gate {
+            let open_ts = event.timestamp_ms / 1000;
+            let open_ts = if open_ts > 0 {
+                open_ts as i64
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            };
+            match event.pool.parse::<Pubkey>() {
+                Ok(pool) => self
+                    .chain_age(mint, pool, open_ts, cfg.max_target_age_s)
+                    .await
+                    .or(Some(f64::NAN)),
+                Err(_) => Some(f64::NAN),
+            }
+        } else {
+            None
+        };
+        let volume = if !volume_gate {
+            None
+        } else if unpriced {
+            tracing::warn!(
+                mint = %event.mint,
+                "[04 STRAT] v071 alt-quote volume has no quote mint"
+            );
+            Some(f64::NAN)
+        } else {
+            match self.volume_legs_to_sol(&legs).await {
+                Some(sol) => Some(sol),
+                None => {
+                    tracing::warn!(
+                        mint = %event.mint,
+                        "[04 STRAT] v071 alt-quote volume has no SOL rate"
+                    );
+                    Some(f64::NAN)
+                }
+            }
+        };
+        tracing::info!(
+            mint = %event.mint,
+            volume = volume.filter(|sol| sol.is_finite()).unwrap_or(-1.0),
+            age_sec = age.filter(|sec| sec.is_finite()).unwrap_or(-1.0),
+            "[04 STRAT] v071 tape"
+        );
+        Some((volume, age))
+    }
+
+    /// Sum window legs as SOL. A missing alt-quote rate makes the whole sum unknown.
+    async fn volume_legs_to_sol(&self, legs: &[(Option<Pubkey>, u64)]) -> Option<f64> {
+        let mut sol = 0.0;
+        for (quote, atoms) in legs {
+            let part = match quote {
+                None => *atoms as f64 / 1_000_000_000.0,
+                Some(quote) => self.quotes.quote_atoms_to_sol(quote, *atoms).await.ok()?,
+            };
+            if !part.is_finite() {
+                return None;
+            }
+            sol += part;
+        }
+        sol.is_finite().then_some(sol)
+    }
+
+    /// Seconds from the pool's first confirmed trade to this buy.
+    ///
+    /// An empty confirmed history means this buy is the first trade, so the
+    /// age is 0. A history older than `max_age` stops paging. No cached birth
+    /// is stored until a block time is actually found.
+    async fn chain_age(
+        &self,
+        mint: Pubkey,
+        pool: Pubkey,
+        open_ts: i64,
+        max_age: f64,
+    ) -> Option<f64> {
+        {
+            let births = self.births.lock().await;
+            if let Some(birth) = births.get(&mint).copied() {
+                return Some(age_between(open_ts, birth));
+            }
+        }
+        let birth = self.confirmed_birth(&pool, open_ts, max_age).await?;
+        if let ConfirmedBirth::Known(time) = birth {
+            self.births.lock().await.insert(mint, time);
+            return Some(age_between(open_ts, time));
+        }
+        Some(0.0)
+    }
+
+    async fn confirmed_birth(
+        &self,
+        pool: &Pubkey,
+        open_ts: i64,
+        max_age: f64,
+    ) -> Option<ConfirmedBirth> {
+        let too_old_before = (max_age > 0.0).then(|| open_ts.saturating_sub(max_age.ceil() as i64));
+        let mut before = None;
+        let mut oldest = None;
+        for _ in 0..8 {
+            let sigs = self
+                .rpc
+                .get_signatures_for_address_with_config(
+                    pool,
+                    GetConfirmedSignaturesForAddress2Config {
+                        before,
+                        until: None,
+                        limit: Some(1_000),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                    },
+                )
+                .await
+                .ok()?;
+            let times: Vec<i64> = sigs.iter().filter_map(|status| status.block_time).collect();
+            let reached_start = sigs.len() < 1_000;
+            match absorb_birth_page(oldest, &times, too_old_before, reached_start) {
+                BirthPage::Ready(time) => return Some(ConfirmedBirth::Known(time)),
+                BirthPage::More(None) if reached_start => return Some(ConfirmedBirth::Unconfirmed),
+                BirthPage::More(next) => {
+                    oldest = next;
+                    before = sigs
+                        .last()
+                        .and_then(|status| status.signature.parse::<Signature>().ok());
+                    if before.is_none() {
+                        return None;
+                    }
+                }
+            }
+        }
+        None
     }
 
     async fn mark_pool_needed(
@@ -829,23 +1028,26 @@ impl TradingRuntime {
                 .parse()
                 .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
             let associated_bonding_curve = ata(&bonding_curve, &mint, &token_program);
-            let associated_quote_bonding_curve = if crate::venues::ids::is_sol_quote(
-                descriptor.quote_mint.as_deref(),
-            ) {
-                None
-            } else {
-                match descriptor.quote_mint.as_deref().and_then(|q| q.parse().ok()) {
-                    Some(quote_mint) => {
-                        let quote_program = self
-                            .quotes
-                            .token_program(&quote_mint)
-                            .await
-                            .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
-                        Some(ata(&bonding_curve, &quote_mint, &quote_program))
+            let associated_quote_bonding_curve =
+                if crate::venues::ids::is_sol_quote(descriptor.quote_mint.as_deref()) {
+                    None
+                } else {
+                    match descriptor
+                        .quote_mint
+                        .as_deref()
+                        .and_then(|q| q.parse().ok())
+                    {
+                        Some(quote_mint) => {
+                            let quote_program = self
+                                .quotes
+                                .token_program(&quote_mint)
+                                .await
+                                .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
+                            Some(ata(&bonding_curve, &quote_mint, &quote_program))
+                        }
+                        None => None,
                     }
-                    None => None,
-                }
-            };
+                };
             GeyserCommand::RegisterCurve {
                 mint,
                 bonding_curve,
@@ -1228,6 +1430,20 @@ impl TradingRuntime {
                 .send(GeyserCommand::Unregister { mint })
                 .await;
         }
+    }
+}
+
+enum ConfirmedBirth {
+    Known(i64),
+    /// No confirmed signature yet. This buy is the first trade.
+    Unconfirmed,
+}
+
+fn age_between(open_ts: i64, birth: i64) -> f64 {
+    if birth >= open_ts {
+        0.0
+    } else {
+        (open_ts - birth) as f64
     }
 }
 

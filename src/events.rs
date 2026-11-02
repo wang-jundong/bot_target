@@ -112,6 +112,7 @@ pub struct CompiledIx {
 pub struct ParsedTargetTransaction {
     pub signature: String,
     pub slot: u64,
+    pub transaction_index: Option<u64>,
     pub timestamp_ms: u64,
     pub account_keys: Vec<String>,
     pub program_ids: Vec<String>,
@@ -120,6 +121,8 @@ pub struct ParsedTargetTransaction {
     pub inner_instructions: Vec<CompiledIx>,
     pub pre_token_balances: Vec<TokenBalanceInfo>,
     pub post_token_balances: Vec<TokenBalanceInfo>,
+    pub pre_balances: Vec<u64>,
+    pub post_balances: Vec<u64>,
     pub failed: bool,
 }
 

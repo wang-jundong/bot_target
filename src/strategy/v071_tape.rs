@@ -1,0 +1,510 @@
+//! Trade-print tape for v071 volume and age.
+//!
+//! Same numbers as scalpingbot `strategy_v_071.py`. Volume is buy SOL plus
+//! sell SOL over `target_volume_s` up to and including the buy that opened
+//! the cycle. A 0 SOL print is left out. An alt-quote print keeps its quote
+//! atoms; the runtime turns those atoms into SOL with the Jupiter rate before
+//! the band is applied. Age is seconds from the mint's first print to that
+//! buy. No earlier print makes the age 0. A zero-size print is kept so that
+//! buy can still end the window. A birth older than the horizon stays too
+//! old instead of becoming a new first print.
+
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signature;
+
+use crate::events::ParsedTargetTransaction;
+use crate::venues::decoder;
+use crate::venues::ids::is_sol_quote;
+
+const MAX_MINTS: usize = 8_192;
+const MAX_SAMPLES_PER_MINT: usize = 512;
+const MAX_FIRST_PRINTS: usize = 262_144;
+
+#[derive(Debug, Clone)]
+struct Sample {
+    at: Instant,
+    /// SOL lamports when `quote` is `None`. Quote atoms when `quote` is set.
+    atoms: u64,
+    quote: Option<Pubkey>,
+    /// A non-SOL print whose quote mint could not be read.
+    unpriced: bool,
+    sig: Signature,
+}
+
+#[derive(Debug, Default)]
+struct Births {
+    by_mint: HashMap<Pubkey, Instant>,
+    by_time: BTreeMap<(Instant, u64), Pubkey>,
+    seq: u64,
+    /// Mints whose first print fell off the horizon. A later print must not
+    /// become a new birth, or an old mint looks young enough to buy.
+    aged_out: HashSet<Pubkey>,
+    aged_order: VecDeque<Pubkey>,
+}
+
+impl Births {
+    fn remember(&mut self, mint: Pubkey, at: Instant, keep: Duration) {
+        self.expire(keep);
+        if self.aged_out.contains(&mint) || self.by_mint.contains_key(&mint) {
+            return;
+        }
+        self.seq = self.seq.wrapping_add(1);
+        self.by_mint.insert(mint, at);
+        self.by_time.insert((at, self.seq), mint);
+        self.expire(keep);
+    }
+
+    fn expire(&mut self, keep: Duration) {
+        let Some(horizon) = Instant::now().checked_sub(keep) else {
+            return;
+        };
+        while let Some(first) = self.by_time.keys().next().copied() {
+            let too_old = first.0 < horizon;
+            let over = self.by_mint.len() > MAX_FIRST_PRINTS;
+            if !too_old && !over {
+                break;
+            }
+            let Some(mint) = self.by_time.remove(&first) else {
+                break;
+            };
+            self.by_mint.remove(&mint);
+            self.mark_aged(mint);
+        }
+    }
+
+    fn mark_aged(&mut self, mint: Pubkey) {
+        if self.aged_out.insert(mint) {
+            self.aged_order.push_back(mint);
+        }
+        while self.aged_order.len() > MAX_FIRST_PRINTS {
+            if let Some(old) = self.aged_order.pop_front() {
+                self.aged_out.remove(&old);
+            }
+        }
+    }
+
+    fn age_at(&self, mint: &Pubkey, open_at: Instant) -> f64 {
+        if self.aged_out.contains(mint) {
+            return f64::NAN;
+        }
+        self.by_mint
+            .get(mint)
+            .map(|at| open_at.saturating_duration_since(*at).as_secs_f64())
+            .unwrap_or(0.0)
+    }
+}
+
+#[derive(Debug)]
+pub struct V071Tape {
+    inner: Mutex<HashMap<Pubkey, VecDeque<Sample>>>,
+    births: Mutex<Births>,
+    birth_keep: Duration,
+}
+
+impl V071Tape {
+    pub fn new(birth_keep: Duration) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            births: Mutex::new(Births::default()),
+            birth_keep,
+        }
+    }
+
+    pub fn push(&self, mint: Pubkey, sol: f64, sig: Signature, keep: Duration) {
+        self.push_at(mint, sol, sig, Instant::now(), keep);
+    }
+
+    pub fn push_at(&self, mint: Pubkey, sol: f64, sig: Signature, at: Instant, keep: Duration) {
+        if sol <= 0.0 || !sol.is_finite() {
+            return;
+        }
+        let atoms = (sol * 1_000_000_000.0).round() as u64;
+        self.push_sample(mint, atoms, None, false, sig, at, keep);
+    }
+
+    fn push_sample(
+        &self,
+        mint: Pubkey,
+        atoms: u64,
+        quote: Option<Pubkey>,
+        unpriced: bool,
+        sig: Signature,
+        at: Instant,
+        keep: Duration,
+    ) {
+        let mut map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        if map.len() >= MAX_MINTS && !map.contains_key(&mint) {
+            evict_coldest(&mut map);
+        }
+        let stale = {
+            let queue = map.entry(mint).or_default();
+            if queue.iter().any(|sample| sample.sig == sig) {
+                return;
+            }
+            queue.push_back(Sample {
+                at,
+                atoms,
+                quote,
+                unpriced,
+                sig,
+            });
+            while queue.len() > MAX_SAMPLES_PER_MINT {
+                queue.pop_front();
+            }
+            let cutoff = Instant::now()
+                .checked_sub(keep)
+                .unwrap_or_else(Instant::now);
+            while queue.front().is_some_and(|sample| sample.at < cutoff) {
+                queue.pop_front();
+            }
+            queue.is_empty()
+        };
+        if stale {
+            map.remove(&mint);
+        }
+    }
+
+    /// Sticky timestamp of the mint's first print. Later prints do not move it.
+    pub fn record_first(&self, mint: Pubkey) {
+        self.record_first_at(mint, Instant::now());
+    }
+
+    pub fn record_first_at(&self, mint: Pubkey, at: Instant) {
+        let mut births = self.births.lock().unwrap_or_else(|err| err.into_inner());
+        births.remember(mint, at, self.birth_keep);
+    }
+
+    /// Quote legs inside the volume window, whether a leg could not be priced,
+    /// and age in seconds at the cycle-opening buy.
+    ///
+    /// Each leg is `(quote_mint, atoms)`. `None` is native SOL lamports. The
+    /// window includes that buy and every sized print in the lookback before
+    /// it. A zero-size print still ends the window. Age is 0 when this buy is
+    /// the first print we saw. Age is non-finite when the birth was older than
+    /// the horizon. Volume is unpriced when this buy's signature is missing,
+    /// so later prints are not counted in its place.
+    pub fn open_window(
+        &self,
+        mint: &Pubkey,
+        lookback: Duration,
+        open_sig: Option<&Signature>,
+    ) -> (Vec<(Option<Pubkey>, u64)>, bool, f64) {
+        let map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        let queue = map.get(mint);
+        let found = queue.and_then(|queue| {
+            open_sig.and_then(|sig| queue.iter().find(|sample| sample.sig == *sig))
+        });
+        let missing_open = open_sig.is_some() && found.is_none();
+        let open_at = found.map(|sample| sample.at).unwrap_or_else(Instant::now);
+        let cutoff = open_at.checked_sub(lookback).unwrap_or(open_at);
+        let mut seen = HashSet::new();
+        let mut legs: Vec<(Option<Pubkey>, u64)> = Vec::new();
+        let mut unpriced = missing_open;
+        if !missing_open {
+            if let Some(queue) = queue {
+                for sample in queue {
+                    if sample.at < cutoff || sample.at > open_at {
+                        continue;
+                    }
+                    if !seen.insert(sample.sig) {
+                        continue;
+                    }
+                    if sample.unpriced {
+                        unpriced = true;
+                        continue;
+                    }
+                    if sample.atoms == 0 {
+                        continue;
+                    }
+                    if let Some((_, atoms)) =
+                        legs.iter_mut().find(|(quote, _)| *quote == sample.quote)
+                    {
+                        *atoms = atoms.saturating_add(sample.atoms);
+                    } else {
+                        legs.push((sample.quote, sample.atoms));
+                    }
+                }
+            }
+        }
+        drop(map);
+        let age = {
+            let births = self.births.lock().unwrap_or_else(|err| err.into_inner());
+            births.age_at(mint, open_at)
+        };
+        (legs, unpriced, age)
+    }
+}
+
+/// One page of signature block times, newest first, the way RPC returns them.
+pub enum BirthPage {
+    /// The first confirmed trade time is known.
+    Ready(i64),
+    /// Older pages may still hold the birth. Carries the oldest time so far.
+    More(Option<i64>),
+}
+
+/// `too_old_before` is `open_ts - max_age` when a max age is set. A block time
+/// at or before that cutoff is old enough to stop paging.
+pub fn absorb_birth_page(
+    oldest: Option<i64>,
+    block_times: &[i64],
+    too_old_before: Option<i64>,
+    reached_start: bool,
+) -> BirthPage {
+    let mut oldest = oldest;
+    for time in block_times {
+        if too_old_before.is_some_and(|cut| *time <= cut) {
+            return BirthPage::Ready(*time);
+        }
+        if oldest.is_none_or(|prior| *time < prior) {
+            oldest = Some(*time);
+        }
+    }
+    if reached_start {
+        match oldest {
+            Some(time) => BirthPage::Ready(time),
+            None => BirthPage::More(None),
+        }
+    } else {
+        BirthPage::More(oldest)
+    }
+}
+
+fn evict_coldest(map: &mut HashMap<Pubkey, VecDeque<Sample>>) {
+    let Some(dead) = map
+        .iter()
+        .min_by_key(|(_, queue)| {
+            queue
+                .back()
+                .map(|sample| sample.at)
+                .unwrap_or_else(Instant::now)
+        })
+        .map(|(mint, _)| *mint)
+    else {
+        return;
+    };
+    map.remove(&dead);
+}
+
+pub fn observe(tx: &ParsedTargetTransaction, tape: &V071Tape, keep: Duration) {
+    if tx.failed {
+        return;
+    }
+    let Ok(signature) = tx.signature.parse::<Signature>() else {
+        return;
+    };
+    let mut by_mint: HashMap<Pubkey, (u64, Option<Pubkey>, bool)> = HashMap::new();
+    for trade in decoder::decode(tx) {
+        let Ok(mint) = trade.descriptor.mint.parse::<Pubkey>() else {
+            continue;
+        };
+        tape.record_first(mint);
+        let atoms = trade.event.sol_amount;
+        let quote_mint = trade.descriptor.quote_mint.as_deref().or_else(|| {
+            trade
+                .event
+                .curve
+                .as_ref()
+                .and_then(|curve| curve.quote_mint.as_deref())
+        });
+        let (quote, bad) = if atoms == 0 || is_sol_quote(quote_mint) {
+            (None, false)
+        } else {
+            match quote_mint.and_then(|quote| quote.parse().ok()) {
+                Some(quote) => (Some(quote), false),
+                None => (None, true),
+            }
+        };
+        match by_mint.get_mut(&mint) {
+            None => {
+                by_mint.insert(mint, (atoms, quote, bad));
+            }
+            Some(entry) => {
+                if atoms == 0 {
+                    continue;
+                }
+                if entry.2 || bad || (entry.0 > 0 && entry.1 != quote) {
+                    entry.2 = true;
+                } else {
+                    entry.1 = quote;
+                    entry.0 = entry.0.saturating_add(atoms);
+                }
+            }
+        }
+    }
+    let at = Instant::now();
+    for (mint, (atoms, quote, bad)) in by_mint {
+        tape.push_sample(mint, atoms, quote, bad, signature, at, keep);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sig(n: u8) -> Signature {
+        Signature::from([n; 64])
+    }
+
+    #[test]
+    fn volume_includes_his_open_and_the_lookback_only() {
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([1u8; 32]);
+        let keep = Duration::from_secs(60);
+        let open_at = Instant::now();
+        book.record_first_at(mint, open_at - Duration::from_secs(30));
+        book.push_at(mint, 9.0, sig(1), open_at - Duration::from_secs(8), keep);
+        book.push_at(mint, 2.0, sig(2), open_at - Duration::from_secs(3), keep);
+        book.push_at(mint, 1.0, sig(3), open_at, keep);
+        book.push_at(mint, 4.0, sig(4), open_at + Duration::from_secs(1), keep);
+        let (legs, unpriced, age) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(3)));
+        assert!(!unpriced);
+        let volume: f64 = legs.iter().map(|(_, atoms)| *atoms as f64 / 1e9).sum();
+        assert!((volume - 3.0).abs() < 1e-9, "vol={volume}");
+        assert!((age - 30.0).abs() < 0.05, "age={age}");
+    }
+
+    #[test]
+    fn no_earlier_print_makes_the_age_zero() {
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([2u8; 32]);
+        let (legs, unpriced, age) = book.open_window(&mint, Duration::from_secs(5), None);
+        assert!(legs.is_empty());
+        assert!(!unpriced);
+        assert_eq!(age, 0.0);
+    }
+
+    #[test]
+    fn alt_quote_keeps_atoms_for_a_later_sol_rate() {
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([3u8; 32]);
+        let quote = Pubkey::new_from_array([9u8; 32]);
+        let keep = Duration::from_secs(60);
+        let open_at = Instant::now();
+        book.push_sample(
+            mint,
+            50_000_000,
+            Some(quote),
+            false,
+            sig(1),
+            open_at - Duration::from_secs(1),
+            keep,
+        );
+        book.push_sample(mint, 150_000_000, Some(quote), false, sig(2), open_at, keep);
+        let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(2)));
+        assert!(!unpriced);
+        assert_eq!(legs, vec![(Some(quote), 200_000_000)]);
+    }
+
+    #[test]
+    fn zero_size_buy_ends_the_window() {
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([4u8; 32]);
+        let keep = Duration::from_secs(60);
+        let open_at = Instant::now();
+        book.push_sample(
+            mint,
+            2_000_000_000,
+            None,
+            false,
+            sig(2),
+            open_at - Duration::from_secs(1),
+            keep,
+        );
+        book.push_sample(mint, 0, None, false, sig(3), open_at, keep);
+        book.push_sample(
+            mint,
+            4_000_000_000,
+            None,
+            false,
+            sig(4),
+            open_at + Duration::from_secs(1),
+            keep,
+        );
+        let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(3)));
+        assert!(!unpriced);
+        let volume: f64 = legs.iter().map(|(_, atoms)| *atoms as f64 / 1e9).sum();
+        assert!((volume - 2.0).abs() < 1e-9, "vol={volume}");
+    }
+
+    #[test]
+    fn missing_open_does_not_count_later_prints() {
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([5u8; 32]);
+        let keep = Duration::from_secs(60);
+        let open_at = Instant::now();
+        book.push_at(mint, 4.0, sig(4), open_at + Duration::from_secs(1), keep);
+        let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(9)));
+        assert!(unpriced);
+        assert!(legs.is_empty());
+    }
+
+    #[test]
+    fn a_full_tape_drops_the_quiet_mint() {
+        let book = V071Tape::new(Duration::from_secs(600));
+        let keep = Duration::from_secs(60);
+        let now = Instant::now();
+        for n in 0..MAX_MINTS {
+            book.push_at(
+                mint_at(n as u32),
+                1.0,
+                sig_at(n as u32),
+                now - Duration::from_secs(30),
+                keep,
+            );
+        }
+        let hot = mint_at(u32::MAX - 1);
+        let fresh = mint_at(u32::MAX - 2);
+        book.push_at(hot, 1.0, sig(1), now, keep);
+        book.push_at(fresh, 2.0, sig(2), now, keep);
+        let (hot_legs, hot_unpriced, _) =
+            book.open_window(&hot, Duration::from_secs(60), Some(&sig(1)));
+        let (fresh_legs, fresh_unpriced, _) =
+            book.open_window(&fresh, Duration::from_secs(60), Some(&sig(2)));
+        assert!(!hot_unpriced && !fresh_unpriced);
+        assert!(!hot_legs.is_empty());
+        assert!(!fresh_legs.is_empty());
+    }
+
+    #[test]
+    fn chain_birth_stops_when_the_mint_is_already_too_old() {
+        let open = 1_000_000;
+        let page = absorb_birth_page(None, &[open - 10, open - 400], Some(open - 300), false);
+        assert!(matches!(page, BirthPage::Ready(time) if time == open - 400));
+    }
+
+    #[test]
+    fn chain_birth_is_the_oldest_time_on_the_last_page() {
+        let open = 1_000_000;
+        let page = absorb_birth_page(Some(open - 20), &[open - 40], Some(open - 300), true);
+        assert!(matches!(page, BirthPage::Ready(time) if time == open - 40));
+    }
+
+    #[test]
+    fn an_old_birth_does_not_start_again() {
+        let book = V071Tape::new(Duration::from_secs(10));
+        let mint = Pubkey::new_from_array([6u8; 32]);
+        book.record_first_at(mint, Instant::now() - Duration::from_secs(30));
+        let (_, _, age) = book.open_window(&mint, Duration::from_secs(5), None);
+        assert!(!age.is_finite(), "age={age}");
+        book.record_first_at(mint, Instant::now());
+        let (_, _, age) = book.open_window(&mint, Duration::from_secs(5), None);
+        assert!(!age.is_finite(), "age={age}");
+    }
+
+    fn mint_at(n: u32) -> Pubkey {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(&n.to_le_bytes());
+        Pubkey::new_from_array(bytes)
+    }
+
+    fn sig_at(n: u32) -> Signature {
+        let mut bytes = [0u8; 64];
+        bytes[..4].copy_from_slice(&n.to_le_bytes());
+        Signature::from(bytes)
+    }
+}
