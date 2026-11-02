@@ -38,6 +38,7 @@ pub fn signature_from_sender_body(status_code: u16, body: &str) -> Result<String
     bail!("Helius Sender rejected transaction: {message}")
 }
 
+#[derive(Clone)]
 pub struct HeliusSender {
     url: String,
     swqos_only: bool,

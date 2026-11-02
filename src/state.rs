@@ -204,6 +204,10 @@ pub struct TokenInner {
     pub strategy_name: String,
     pub sell_after_fill: bool,
     pub pool_tape_needed: Option<bool>,
+    /// Set when our buy lands. Survives a flat sell so a later pool drop is not an abandon.
+    pub had_own_fill: bool,
+    /// Separate SOL→quote signature when the buy was split. The one-transaction buy already includes it.
+    pub alt_refill_signature: Option<String>,
     /// Fills seen on the pool stream, keyed by signature. Confirmation can use these
     /// instead of waiting for an RPC `confirmed` lookup.
     own_fills: HashMap<String, (u64, u64, f64)>,
@@ -245,6 +249,8 @@ impl TokenInner {
             strategy_name,
             sell_after_fill: false,
             pool_tape_needed: None,
+            had_own_fill: false,
+            alt_refill_signature: None,
             own_fills: HashMap::new(),
             own_fill_notify: Arc::new(Notify::new()),
         }
@@ -328,6 +334,7 @@ impl TokenInner {
         self.prices.actual_entry_fill_price = Some(entry_price);
         self.prices.current_mark_price = Some(current_price);
         self.entry_processed_ms = Some(entry_processed_ms);
+        self.had_own_fill = true;
         self.lifecycle = Lifecycle::PositionActiveConfirmed;
     }
 
@@ -339,6 +346,7 @@ impl TokenInner {
         self.prepared_sell = None;
         self.buy_signature = None;
         self.sell_signature = None;
+        self.alt_refill_signature = None;
         self.entry_processed_ms = None;
         self.buy_slippage_bps = None;
         self.sell_slippage_bps = None;

@@ -169,6 +169,9 @@ pub struct PnlRecord {
     pub entry_processed_ms: u64,
     pub holding_time_ms: u64,
     pub prices: PositionPrices,
+    /// `quote` is expected proceeds minus the Jupiter budget. `wallet` is the lamport round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pnl_source: Option<String>,
 }
 
 pub struct ClosedTradePnlInput {
@@ -184,13 +187,21 @@ pub struct ClosedTradePnlInput {
     pub buy_signature: Option<String>,
     pub sell_signature: Option<String>,
     pub entry_processed_ms: u64,
+    /// Sum of wallet `post − pre` lamports across the buy, sell, and any separate SOL→quote leg.
+    pub wallet_pnl_lamports: Option<i64>,
 }
 
 pub fn create_pnl_record(input: ClosedTradePnlInput) -> Result<PnlRecord> {
     if input.buy_lamports == 0 {
         anyhow::bail!("confirmed BUY SOL amount must be positive");
     }
-    let pnl = input.sell_lamports as i64 - input.buy_lamports as i64;
+    let quote_pnl = input.sell_lamports as i64 - input.buy_lamports as i64;
+    let pnl = input.wallet_pnl_lamports.unwrap_or(quote_pnl);
+    let pnl_source = if input.wallet_pnl_lamports.is_some() {
+        "wallet"
+    } else {
+        "quote"
+    };
     let buy_sol = input.buy_lamports as f64 / crate::events::LAMPORTS_PER_SOL as f64;
     let sell_sol = input.sell_lamports as f64 / crate::events::LAMPORTS_PER_SOL as f64;
     Ok(PnlRecord {
@@ -228,6 +239,7 @@ pub fn create_pnl_record(input: ClosedTradePnlInput) -> Result<PnlRecord> {
         entry_processed_ms: input.entry_processed_ms,
         holding_time_ms: input.closed_at_ms.saturating_sub(input.entry_processed_ms),
         prices: input.prices,
+        pnl_source: Some(pnl_source.to_string()),
     })
 }
 

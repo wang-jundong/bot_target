@@ -1,6 +1,7 @@
 /// Gitignored secrets — copy from `bindings.example.rs` if missing.
 #[path = "bindings.rs"]
 mod bindings;
+pub mod alt_quote;
 pub mod config;
 pub mod events;
 pub mod execution;

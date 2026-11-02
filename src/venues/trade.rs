@@ -2,8 +2,9 @@ use super::ids::{
     HELIUS_TIP_ACCOUNTS, PUMP_AMM_PROGRAM, PUMP_BUYBACK_FEE_RECIPIENTS, PUMP_FEE_PROGRAM,
     PUMP_PROGRAM, amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume,
     amm_user_volume, ata, bonding_curve_pda, bonding_curve_v2_pda, coin_creator_vault_authority,
-    creator_vault_pda, is_pump_fee_recipient, pool_v2_pda, pump_event_authority, pump_fee_config,
-    pump_fee_recipients, pump_global, pump_global_volume, pump_user_volume,
+    creator_vault_pda,
+    is_pump_fee_recipient, pool_v2_pda, pump_event_authority, pump_fee_config, pump_fee_recipients,
+    pump_global, pump_global_volume, pump_user_volume, sharing_config_pda,
 };
 use super::quote::{
     quote_amm_buy, quote_amm_sell, quote_buy_tokens, quote_sell_sol, slippage_down,
@@ -14,7 +15,7 @@ use anyhow::{Result, bail};
 use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_sdk::hash::Hash;
 use solana_sdk::instruction::{AccountMeta, Instruction};
-use solana_sdk::message::{VersionedMessage, v0, v1};
+use solana_sdk::message::{AddressLookupTableAccount, VersionedMessage, v0, v1};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::VersionedTransaction;
@@ -22,7 +23,11 @@ use solana_system_interface::instruction as system_instruction;
 use solana_system_interface::program as system_program;
 
 const BUY_EXACT_SOL_IN: [u8; 8] = [56, 252, 116, 8, 158, 223, 205, 95];
+/// IDL `buy_exact_quote_in_v2`. Same accounts as `buy_v2`.
+const BUY_EXACT_QUOTE_IN_V2: [u8; 8] = [194, 171, 28, 70, 104, 77, 91, 47];
 const SELL: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+/// IDL `sell_v2`. Quote out is the alt mint, not SOL.
+const SELL_V2: [u8; 8] = [93, 246, 130, 60, 231, 233, 64, 178];
 const AMM_BUY: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 
 fn pick(list: &[Pubkey]) -> Pubkey {
@@ -92,6 +97,7 @@ pub fn build_pump_buy(
     compute_unit_limit: u32,
     priority_fee_lamports: u64,
     tip_lamports: u64,
+    buyback: bool,
 ) -> Result<PreparedTrade> {
     let quoted = quote_buy_tokens(lamports as u128, curve);
     if quoted == 0 {
@@ -107,28 +113,31 @@ pub fn build_pump_buy(
     data.extend_from_slice(&u64_le(lamports));
     data.extend_from_slice(&u64_le(min_tokens));
     data.push(1);
+    let mut accounts = vec![
+        meta(pump_global(), false, false),
+        meta(fee_recipient, true, false),
+        meta(*mint, false, false),
+        meta(curve_pda, true, false),
+        meta(ata(&curve_pda, mint, token_program), true, false),
+        meta(associated_user, true, false),
+        meta(*owner, true, true),
+        meta(system_program::id(), false, false),
+        meta(*token_program, false, false),
+        meta(creator_vault_pda(&creator), true, false),
+        meta(pump_event_authority(), false, false),
+        meta(*PUMP_PROGRAM, false, false),
+        meta(pump_global_volume(), false, false),
+        meta(pump_user_volume(owner), true, false),
+        meta(pump_fee_config(), false, false),
+        meta(*PUMP_FEE_PROGRAM, false, false),
+    ];
+    if buyback {
+        accounts.push(meta(bonding_curve_v2_pda(mint), true, false));
+        accounts.push(meta(resolve_buyback_fee_recipient(), true, false));
+    }
     let buy = Instruction {
         program_id: *PUMP_PROGRAM,
-        accounts: vec![
-            meta(pump_global(), false, false),
-            meta(fee_recipient, true, false),
-            meta(*mint, false, false),
-            meta(curve_pda, true, false),
-            meta(ata(&curve_pda, mint, token_program), true, false),
-            meta(associated_user, true, false),
-            meta(*owner, true, true),
-            meta(system_program::id(), false, false),
-            meta(*token_program, false, false),
-            meta(creator_vault_pda(&creator), true, false),
-            meta(pump_event_authority(), false, false),
-            meta(*PUMP_PROGRAM, false, false),
-            meta(pump_global_volume(), false, false),
-            meta(pump_user_volume(owner), true, false),
-            meta(pump_fee_config(), false, false),
-            meta(*PUMP_FEE_PROGRAM, false, false),
-            meta(bonding_curve_v2_pda(mint), false, false),
-            meta(resolve_buyback_fee_recipient(), true, false),
-        ],
+        accounts,
         data,
     };
     Ok(prepared(
@@ -153,6 +162,7 @@ pub fn build_pump_sell(
     compute_unit_limit: u32,
     priority_fee_lamports: u64,
     tip_lamports: u64,
+    buyback: bool,
 ) -> Result<PreparedTrade> {
     let sol_out = quote_sell_sol(token_amount as u128, curve);
     let min_sol = slippage_down(sol_out, slippage_bps) as u64;
@@ -179,11 +189,18 @@ pub fn build_pump_sell(
         meta(pump_fee_config(), false, false),
         meta(*PUMP_FEE_PROGRAM, false, false),
     ];
+    // Cashback wants [user volume, curve v2]. Buyback wants [curve v2, recipient].
+    // When both apply, curve v2 is shared and only the recipient is added.
     if curve.cashback {
         accounts.push(meta(pump_user_volume(owner), true, false));
+        accounts.push(meta(bonding_curve_v2_pda(mint), true, false));
     }
-    accounts.push(meta(bonding_curve_v2_pda(mint), false, false));
-    accounts.push(meta(resolve_buyback_fee_recipient(), true, false));
+    if buyback {
+        if !curve.cashback {
+            accounts.push(meta(bonding_curve_v2_pda(mint), true, false));
+        }
+        accounts.push(meta(resolve_buyback_fee_recipient(), true, false));
+    }
     Ok(prepared(
         vec![Instruction {
             program_id: *PUMP_PROGRAM,
@@ -195,6 +212,144 @@ pub fn build_pump_sell(
         priority_fee_lamports,
         tip_lamports,
     ))
+}
+
+/// Alt-quote curve buy instructions (no compute budget, no tip).
+/// `spend_atoms` is quote base units. Jupiter's min-out is the right value for a one-tx buy.
+pub fn pump_alt_buy_instructions(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_program: &Pubkey,
+    spend_atoms: u64,
+    slippage_bps: u64,
+    curve: &PumpCurveSnapshot,
+) -> Result<Vec<Instruction>> {
+    let quoted = quote_buy_tokens(spend_atoms as u128, curve);
+    if quoted == 0 {
+        bail!("alt-quote buy quotes zero tokens for {mint}");
+    }
+    let min_tokens = slippage_down(quoted, slippage_bps) as u64;
+    let mut data = Vec::with_capacity(24);
+    data.extend_from_slice(&BUY_EXACT_QUOTE_IN_V2);
+    data.extend_from_slice(&u64_le(spend_atoms));
+    data.extend_from_slice(&u64_le(min_tokens));
+    let buy = Instruction {
+        program_id: *PUMP_PROGRAM,
+        accounts: pump_alt_accounts(
+            owner,
+            mint,
+            token_program,
+            quote_mint,
+            quote_program,
+            curve,
+            true,
+        )?,
+        data,
+    };
+    Ok(vec![
+        create_ata_idempotent(owner, owner, mint, token_program),
+        create_ata_idempotent(owner, owner, quote_mint, quote_program),
+        buy,
+    ])
+}
+
+/// Alt-quote curve sell: mint → quote only. Quote stays in the ATA until reclaim.
+pub fn build_pump_sell_alt(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_program: &Pubkey,
+    token_amount: u64,
+    slippage_bps: u64,
+    curve: &PumpCurveSnapshot,
+    compute_unit_limit: u32,
+    priority_fee_lamports: u64,
+    tip_lamports: u64,
+) -> Result<PreparedTrade> {
+    let quote_out = quote_sell_sol(token_amount as u128, curve);
+    let min_quote = slippage_down(quote_out, slippage_bps) as u64;
+    let mut data = Vec::with_capacity(24);
+    data.extend_from_slice(&SELL_V2);
+    data.extend_from_slice(&u64_le(token_amount));
+    data.extend_from_slice(&u64_le(min_quote));
+    Ok(prepared(
+        vec![
+            create_ata_idempotent(owner, owner, quote_mint, quote_program),
+            Instruction {
+                program_id: *PUMP_PROGRAM,
+                accounts: pump_alt_accounts(
+                    owner,
+                    mint,
+                    token_program,
+                    quote_mint,
+                    quote_program,
+                    curve,
+                    false,
+                )?,
+                data,
+            },
+        ],
+        *owner,
+        compute_unit_limit,
+        priority_fee_lamports,
+        tip_lamports,
+    ))
+}
+
+fn pump_alt_accounts(
+    owner: &Pubkey,
+    mint: &Pubkey,
+    token_program: &Pubkey,
+    quote_mint: &Pubkey,
+    quote_program: &Pubkey,
+    curve: &PumpCurveSnapshot,
+    buy: bool,
+) -> Result<Vec<AccountMeta>> {
+    let creator: Pubkey = curve.creator.parse()?;
+    let fee_recipient = resolve_fee_recipient(curve);
+    let buyback = resolve_buyback_fee_recipient();
+    let curve_pda = bonding_curve_pda(mint);
+    let creator_vault = creator_vault_pda(&creator);
+    let user_volume = pump_user_volume(owner);
+    let mut accounts = vec![
+        meta(pump_global(), false, false),
+        meta(*mint, false, false),
+        meta(*quote_mint, false, false),
+        meta(*token_program, false, false),
+        meta(*quote_program, false, false),
+        meta(*super::ids::ATA_PROGRAM, false, false),
+        meta(fee_recipient, true, false),
+        meta(ata(&fee_recipient, quote_mint, quote_program), true, false),
+        meta(buyback, true, false),
+        meta(ata(&buyback, quote_mint, quote_program), true, false),
+        meta(curve_pda, true, false),
+        meta(ata(&curve_pda, mint, token_program), true, false),
+        meta(ata(&curve_pda, quote_mint, quote_program), true, false),
+        meta(*owner, true, true),
+        meta(ata(owner, mint, token_program), true, false),
+        meta(ata(owner, quote_mint, quote_program), true, false),
+        meta(creator_vault, true, false),
+        meta(ata(&creator_vault, quote_mint, quote_program), true, false),
+        meta(sharing_config_pda(mint), false, false),
+    ];
+    if buy {
+        accounts.push(meta(pump_global_volume(), false, false));
+    }
+    accounts.push(meta(user_volume, true, false));
+    accounts.push(meta(
+        ata(&user_volume, quote_mint, quote_program),
+        true,
+        false,
+    ));
+    accounts.push(meta(pump_fee_config(), false, false));
+    accounts.push(meta(*PUMP_FEE_PROGRAM, false, false));
+    accounts.push(meta(system_program::id(), false, false));
+    accounts.push(meta(pump_event_authority(), false, false));
+    accounts.push(meta(*PUMP_PROGRAM, false, false));
+    Ok(accounts)
 }
 
 pub fn build_amm_buy(
@@ -452,6 +607,66 @@ fn prepared(
 /// v1 treats an unset limit as zero and the transaction fails.
 const LOADED_ACCOUNTS_DATA_SIZE_LIMIT: u32 = 64 * 1024 * 1024;
 
+pub fn compile_v1_ixs(
+    payer: &Pubkey,
+    instructions: &[Instruction],
+    blockhash: Hash,
+    keypair: &Keypair,
+    compute_unit_limit: u32,
+    priority_fee_lamports: u64,
+    tip_lamports: u64,
+) -> Result<VersionedTransaction> {
+    let mut ixs = Vec::with_capacity(instructions.len() + 1);
+    if tip_lamports > 0 {
+        ixs.push(system_instruction::transfer(
+            payer,
+            &pick(&HELIUS_TIP_ACCOUNTS),
+            tip_lamports,
+        ));
+    }
+    ixs.extend(instructions.iter().cloned());
+    let config = v1::TransactionConfig::empty()
+        .with_compute_unit_limit(compute_unit_limit.max(1))
+        .with_loaded_accounts_data_size_limit(LOADED_ACCOUNTS_DATA_SIZE_LIMIT)
+        .with_priority_fee(priority_fee_lamports);
+    let message = v1::Message::try_compile_with_config(payer, &ixs, blockhash, config)?;
+    Ok(VersionedTransaction::try_new(
+        VersionedMessage::V1(message),
+        &[keypair],
+    )?)
+}
+
+pub fn compile_v0_ixs(
+    payer: &Pubkey,
+    instructions: &[Instruction],
+    alts: &[AddressLookupTableAccount],
+    blockhash: Hash,
+    keypair: &Keypair,
+    compute_unit_limit: u32,
+    priority_fee_lamports: u64,
+    tip_lamports: u64,
+) -> Result<VersionedTransaction> {
+    let micro = (priority_fee_lamports as u128 * 1_000_000)
+        .div_ceil(compute_unit_limit.max(1) as u128) as u64;
+    let mut ixs = vec![
+        ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit),
+        ComputeBudgetInstruction::set_compute_unit_price(micro),
+    ];
+    if tip_lamports > 0 {
+        ixs.push(system_instruction::transfer(
+            payer,
+            &pick(&HELIUS_TIP_ACCOUNTS),
+            tip_lamports,
+        ));
+    }
+    ixs.extend(instructions.iter().cloned());
+    let message = v0::Message::try_compile(payer, &ixs, alts, blockhash)?;
+    Ok(VersionedTransaction::try_new(
+        VersionedMessage::V0(message),
+        &[keypair],
+    )?)
+}
+
 pub fn compile_trade(
     prepared: &PreparedTrade,
     blockhash: Hash,
@@ -587,6 +802,84 @@ mod tests {
     }
 
     #[test]
+    fn buyback_accounts_follow_the_global_flag() {
+        let owner = Pubkey::new_unique();
+        let mint = Pubkey::new_unique();
+        let curve = sample_curve(None);
+        let off = build_pump_buy(
+            &owner,
+            &mint,
+            &crate::venues::ids::TOKEN_PROGRAM,
+            1_000_000,
+            500,
+            &curve,
+            150_000,
+            10_000,
+            0,
+            false,
+        )
+        .unwrap();
+        let buy = off
+            .instructions
+            .iter()
+            .find(|ix| ix.program_id == *PUMP_PROGRAM)
+            .unwrap();
+        assert_eq!(buy.accounts.last().unwrap().pubkey, *PUMP_FEE_PROGRAM);
+
+        let on = build_pump_buy(
+            &owner,
+            &mint,
+            &crate::venues::ids::TOKEN_PROGRAM,
+            1_000_000,
+            500,
+            &curve,
+            150_000,
+            10_000,
+            0,
+            true,
+        )
+        .unwrap();
+        let buy = on
+            .instructions
+            .iter()
+            .find(|ix| ix.program_id == *PUMP_PROGRAM)
+            .unwrap();
+        assert_eq!(
+            buy.accounts[buy.accounts.len() - 2].pubkey,
+            bonding_curve_v2_pda(&mint)
+        );
+        assert!(crate::venues::ids::is_pump_buyback_fee_recipient(
+            &buy.accounts.last().unwrap().pubkey
+        ));
+
+        let mut cashback = sample_curve(None);
+        cashback.cashback = true;
+        let sell = build_pump_sell(
+            &owner,
+            &mint,
+            &crate::venues::ids::TOKEN_PROGRAM,
+            1_000_000,
+            500,
+            &cashback,
+            150_000,
+            10_000,
+            0,
+            false,
+        )
+        .unwrap();
+        let sell = sell
+            .instructions
+            .iter()
+            .find(|ix| ix.program_id == *PUMP_PROGRAM)
+            .unwrap();
+        assert_eq!(
+            sell.accounts[sell.accounts.len() - 2].pubkey,
+            pump_user_volume(&owner)
+        );
+        assert_eq!(sell.accounts.last().unwrap().pubkey, bonding_curve_v2_pda(&mint));
+    }
+
+    #[test]
     fn rejects_system_program_fee_recipient_on_sell() {
         let owner = Pubkey::new_unique();
         let mint = Pubkey::new_unique();
@@ -602,6 +895,7 @@ mod tests {
             150_000,
             100_000,
             5_000,
+            false,
         )
         .unwrap();
         let sell = prepared
@@ -664,6 +958,7 @@ mod tests {
             150_000,
             10_000,
             5_000,
+            true,
         )
         .unwrap();
         let tx = compile_trade(&prepared, Hash::default(), &owner).unwrap();
@@ -682,6 +977,7 @@ mod tests {
             150_000,
             10_000,
             5_000,
+            true,
         )
         .unwrap();
         let tx = compile_trade(&prepared, Hash::default(), &owner).unwrap();

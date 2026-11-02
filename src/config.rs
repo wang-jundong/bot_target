@@ -683,6 +683,7 @@ pub struct StrategyPlan {
     pub keypair: Keypair,
     pub target_sell_exit: bool,
     pub first_cycle_only: bool,
+    pub quote_pairs: QuotePairs,
 }
 
 impl StrategyPlan {
@@ -720,6 +721,34 @@ pub struct AppConfig {
     pub log_level: String,
     pub recovery_path: PathBuf,
     pub pnl_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotePairs {
+    Sol,
+    NonSol,
+    All,
+}
+
+impl QuotePairs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sol => "sol",
+            Self::NonSol => "non-sol",
+            Self::All => "all",
+        }
+    }
+
+    /// `None` when this strategy may trade the quote. SOL includes native SOL and wSOL.
+    pub fn rejects(self, quote_mint: Option<&str>) -> Option<&'static str> {
+        let sol = crate::venues::ids::is_sol_quote(quote_mint);
+        match self {
+            Self::All => None,
+            Self::Sol if !sol => Some("reject_sol_only"),
+            Self::NonSol if sol => Some("reject_non_sol_only"),
+            Self::Sol | Self::NonSol => None,
+        }
+    }
 }
 
 /// Load settings from `src/bindings.rs` (gitignored).
@@ -814,6 +843,33 @@ pub fn load_config() -> Result<AppConfig> {
     })
 }
 
+fn parse_quote_pairs(strategy: StrategyName, raw: &str) -> Result<QuotePairs> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "sol" => Ok(QuotePairs::Sol),
+        "all" => Ok(QuotePairs::All),
+        "non-sol" | "non_sol" => Ok(QuotePairs::NonSol),
+        other => bail!(
+            "{} QUOTE_PAIRS must be sol|non-sol|all, got {other}",
+            strategy.as_str()
+        ),
+    }
+}
+
+fn quote_pairs_setting(name: StrategyName) -> &'static str {
+    match name {
+        StrategyName::V011 => settings::STRATEGY_V_011_QUOTE_PAIRS,
+        StrategyName::V022 => settings::STRATEGY_V_022_QUOTE_PAIRS,
+        StrategyName::V031 => settings::STRATEGY_V_031_QUOTE_PAIRS,
+        StrategyName::V051 => settings::STRATEGY_V_051_QUOTE_PAIRS,
+        StrategyName::V061 => settings::STRATEGY_V_061_QUOTE_PAIRS,
+        StrategyName::V071 => settings::STRATEGY_V_071_QUOTE_PAIRS,
+        StrategyName::V081 => settings::STRATEGY_V_081_QUOTE_PAIRS,
+        StrategyName::V101 => settings::STRATEGY_V_101_QUOTE_PAIRS,
+        StrategyName::V121 => settings::STRATEGY_V_121_QUOTE_PAIRS,
+        StrategyName::V131 => settings::STRATEGY_V_131_QUOTE_PAIRS,
+    }
+}
+
 fn selected_strategy_names() -> Result<Vec<StrategyName>> {
     let mut names = Vec::new();
     for raw in settings::ACTIVE_STRATEGIES {
@@ -841,6 +897,7 @@ fn build_plan(
     v121: &StrategyV121Config,
     v131: &StrategyV131Config,
 ) -> Result<StrategyPlan> {
+    let quote_pairs = parse_quote_pairs(name, quote_pairs_setting(name))?;
     let (target_wallet, size_sol, max_mc, target_sell_exit, first_cycle_only) = match name {
         StrategyName::V011 => (
             v011.gate_wallet.clone(),
@@ -931,6 +988,7 @@ fn build_plan(
         keypair: resolve_trading_keypair(name)?,
         target_sell_exit,
         first_cycle_only,
+        quote_pairs,
     })
 }
 
@@ -1023,6 +1081,32 @@ fn require_str(name: &str, value: &str) -> Result<String> {
         bail!("{name} is required — edit src/bindings.rs");
     }
     Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QuotePairs, StrategyName, parse_quote_pairs};
+
+    #[test]
+    fn quote_mode_keeps_the_pairs_it_names() {
+        let sol = Some("So11111111111111111111111111111111111111112");
+        let usdc = Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert!(QuotePairs::All.rejects(sol).is_none());
+        assert!(QuotePairs::All.rejects(usdc).is_none());
+        assert!(QuotePairs::Sol.rejects(sol).is_none());
+        assert_eq!(QuotePairs::Sol.rejects(usdc), Some("reject_sol_only"));
+        assert_eq!(QuotePairs::NonSol.rejects(sol), Some("reject_non_sol_only"));
+        assert!(QuotePairs::NonSol.rejects(usdc).is_none());
+        assert!(QuotePairs::NonSol.rejects(None).is_some());
+        assert_eq!(
+            parse_quote_pairs(StrategyName::V022, "").unwrap(),
+            QuotePairs::Sol
+        );
+        assert_eq!(
+            parse_quote_pairs(StrategyName::V022, "sol").unwrap(),
+            QuotePairs::Sol
+        );
+    }
 }
 
 /// Untagged journal records belong to the first active strategy.

@@ -118,6 +118,7 @@ pub struct ParsedTargetTransaction {
     pub logs: Vec<String>,
     pub instructions: Vec<CompiledIx>,
     pub inner_instructions: Vec<CompiledIx>,
+    pub pre_token_balances: Vec<TokenBalanceInfo>,
     pub post_token_balances: Vec<TokenBalanceInfo>,
     pub failed: bool,
 }

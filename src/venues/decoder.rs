@@ -110,6 +110,57 @@ pub fn decode(tx: &ParsedTargetTransaction) -> Vec<ParsedTrade> {
             }
         }
     }
+    if !tx_has_stonk_platform(&tx.account_keys) {
+        return trades;
+    }
+    for ix in tx.instructions.iter().chain(tx.inner_instructions.iter()) {
+        let Some(hit) = super::launchpad::trade_from_ix(&tx.account_keys, ix) else {
+            continue;
+        };
+        if trades.iter().any(|trade| {
+            trade.descriptor.mint == hit.mint_a && trade.event.trader == hit.trader
+        }) {
+            continue;
+        }
+        let pre_base = balance_of(&tx.pre_token_balances, &hit.trader, &hit.mint_a);
+        let post_base = balance_of(&tx.post_token_balances, &hit.trader, &hit.mint_a);
+        let pre_quote = balance_of(&tx.pre_token_balances, &hit.trader, &hit.mint_b);
+        let post_quote = balance_of(&tx.post_token_balances, &hit.trader, &hit.mint_b);
+        let (quote_atoms, token_amount) = if hit.is_buy {
+            (pre_quote.saturating_sub(post_quote), post_base.saturating_sub(pre_base))
+        } else {
+            (post_quote.saturating_sub(pre_quote), pre_base.saturating_sub(post_base))
+        };
+        if token_amount == 0 {
+            continue;
+        }
+        let token_program = token_program_for(tx, &hit.mint_a);
+        let descriptor = PoolDescriptor {
+            mint: hit.mint_a.clone(),
+            pool: hit.pool.clone(),
+            program_id: super::launchpad::PROGRAM_ID_STR.to_string(),
+            venue: "launchlab".to_string(),
+            token_program,
+            quote_mint: Some(hit.mint_b.clone()),
+            pool_base_token_account: None,
+            pool_quote_token_account: None,
+            relevant_accounts: vec![hit.pool.clone(), hit.mint_a.clone()],
+        };
+        let event = base_event(
+            tx,
+            event_index,
+            &descriptor,
+            &hit.trader,
+            hit.is_buy,
+            quote_atoms,
+            token_amount,
+            ratio(quote_atoms, token_amount),
+            None,
+            (tx.timestamp_ms / 1000) as i64,
+        );
+        event_index += 1;
+        trades.push(ParsedTrade { descriptor, event });
+    }
     trades
 }
 
@@ -356,6 +407,22 @@ fn vault(
             match_.program_id.clone()
         },
     })
+}
+
+fn tx_has_stonk_platform(keys: &[String]) -> bool {
+    keys.iter().any(|key| {
+        key.parse()
+            .ok()
+            .is_some_and(|pubkey| super::launchpad::is_stonk_platform(&pubkey))
+    })
+}
+
+fn balance_of(balances: &[TokenBalanceInfo], owner: &str, mint: &str) -> u64 {
+    balances
+        .iter()
+        .filter(|balance| balance.owner == owner && balance.mint == mint)
+        .map(|balance| balance.amount)
+        .sum()
 }
 
 fn token_program_for(tx: &ParsedTargetTransaction, mint: &str) -> Option<String> {

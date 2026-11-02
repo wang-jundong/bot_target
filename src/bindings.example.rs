@@ -59,3 +59,18 @@ pub const BLOCKHASH_REFRESH_MS: u64 = 10_000;
 pub const LOG_LEVEL: &str = "info";
 pub const RECOVERY_PATH: &str = "./recovery/lifecycle.jsonl";
 pub const PNL_PATH: &str = "./logs/pnl.jsonl";
+
+/// Optional. Non-SOL pairs use Jupiter (plugin path). Empty falls back to `JUPITER_API_KEY`.
+pub const JUPITER_API_KEY: &str = "";
+
+/// Per strategy. Empty and `sol` trade SOL pairs. `non-sol` trades alt quotes. `all` trades both.
+pub const STRATEGY_V_011_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_022_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_031_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_051_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_061_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_071_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_081_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_101_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_121_QUOTE_PAIRS: &str = "";
+pub const STRATEGY_V_131_QUOTE_PAIRS: &str = "";

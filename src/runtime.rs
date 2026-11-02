@@ -1,3 +1,4 @@
+use crate::alt_quote::AltQuote;
 use crate::config::{AppConfig, StrategyName, journal_record_matches_strategy};
 use crate::events::{
     PoolTradeEvent, Side, lamports_to_sol, pool_key, sol_to_lamports_f64, to_strategy_price,
@@ -26,6 +27,7 @@ struct StrategySlot {
     target_sell_exit: bool,
     first_cycle_only: bool,
     buy_amount_lamports: u64,
+    quote_pairs: crate::config::QuotePairs,
     execution: Arc<LiveExecution>,
     tokens: Mutex<HashMap<String, Arc<Mutex<TokenInner>>>>,
     busy: Mutex<HashSet<String>>,
@@ -37,6 +39,7 @@ pub struct TradingRuntime {
     rpc: Arc<RpcClient>,
     geyser: GeyserHandle,
     journal: Arc<RecoveryJournal>,
+    quotes: Arc<AltQuote>,
     slots: Vec<Arc<StrategySlot>>,
     /// program:pool → (mint, set of slot names still needing the tape)
     registered: Mutex<HashMap<String, (Pubkey, HashSet<&'static str>)>>,
@@ -51,6 +54,7 @@ impl TradingRuntime {
         rpc: Arc<RpcClient>,
         geyser: GeyserHandle,
         journal: Arc<RecoveryJournal>,
+        quotes: Arc<AltQuote>,
         executions: Vec<Arc<LiveExecution>>,
         inbound: mpsc::Receiver<crate::events::ParsedTargetTransaction>,
     ) -> Arc<Self> {
@@ -65,6 +69,7 @@ impl TradingRuntime {
                     target_sell_exit: plan.target_sell_exit,
                     first_cycle_only: plan.first_cycle_only,
                     buy_amount_lamports: plan.buy_amount_lamports,
+                    quote_pairs: plan.quote_pairs,
                     execution,
                     tokens: Mutex::new(HashMap::new()),
                     busy: Mutex::new(HashSet::new()),
@@ -77,6 +82,7 @@ impl TradingRuntime {
             rpc,
             geyser,
             journal,
+            quotes,
             slots,
             registered: Mutex::new(HashMap::new()),
             inbound: Mutex::new(Some(inbound)),
@@ -86,6 +92,13 @@ impl TradingRuntime {
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<()> {
+        for slot in &self.slots {
+            tracing::info!(
+                strategy = slot.name.as_str(),
+                quote_pairs = slot.quote_pairs.as_str(),
+                "[01 STARTUP] Quote pairs"
+            );
+        }
         tracing::info!("[02 STREAM] Geyser client started (New Folder transport)");
         self.recover().await?;
         let Some(mut rx) = self.inbound.lock().await.take() else {
@@ -237,6 +250,74 @@ impl TradingRuntime {
         Ok(())
     }
 
+    /// SOL pairs pass through. A fresh Jupiter rate rewrites an alt-quote print
+    /// into SOL. A missing rate keeps the print and refreshes in the background.
+    /// An open pair keeps its last mark so a target sell still fires.
+    async fn strategy_event(
+        self: &Arc<Self>,
+        slot: &StrategySlot,
+        key: &str,
+        descriptor: &crate::events::PoolDescriptor,
+        event: &PoolTradeEvent,
+    ) -> Option<PoolTradeEvent> {
+        let Some(quote_mint) = pump_alt_mint(descriptor, event) else {
+            return Some(event.clone());
+        };
+        let mut priced = event.clone();
+        if descriptor.venue == "launchlab" {
+            self.cache_launchpad(descriptor).await;
+        }
+        match self
+            .quotes
+            .scale_from_cache(&quote_mint, &mut priced.sol_amount, &mut priced.price)
+            .await
+        {
+            Ok(true) => Some(priced),
+            Ok(false) => {
+                self.quotes.spawn_fx_refresh(quote_mint);
+                self.keep_unpriced_alt_print(slot, key, descriptor, priced, None)
+                    .await
+            }
+            Err(err) => {
+                self.quotes.spawn_fx_refresh(quote_mint);
+                self.keep_unpriced_alt_print(slot, key, descriptor, priced, Some(err))
+                    .await
+            }
+        }
+    }
+
+    /// Missing SOL rate. An open pair keeps its last mark and ignores this
+    /// print's size. A new pair is still tracked, with the quote amount left
+    /// as it arrived, until a later print has a rate.
+    async fn keep_unpriced_alt_print(
+        &self,
+        slot: &StrategySlot,
+        key: &str,
+        descriptor: &crate::events::PoolDescriptor,
+        mut priced: PoolTradeEvent,
+        err: Option<anyhow::Error>,
+    ) -> Option<PoolTradeEvent> {
+        let existing = slot.tokens.lock().await.get(key).cloned();
+        if let Some(token) = existing {
+            tracing::warn!(
+                error = err.as_ref().map(|err| err.to_string()).unwrap_or_default(),
+                mint = %descriptor.mint,
+                "[03 DETECT] Alt-quote FX unavailable; keeping last mark"
+            );
+            priced.sol_amount = 0;
+            if let Some(mark) = token.lock().await.prices.current_mark_price {
+                priced.price = mark;
+            }
+            return Some(priced);
+        }
+        tracing::warn!(
+            error = err.as_ref().map(|err| err.to_string()).unwrap_or_default(),
+            mint = %descriptor.mint,
+            "[03 DETECT] Alt-quote FX missing; keeping the print and refreshing the rate"
+        );
+        Some(priced)
+    }
+
     async fn apply_slot(
         self: &Arc<Self>,
         slot: &Arc<StrategySlot>,
@@ -244,17 +325,41 @@ impl TradingRuntime {
         event: &PoolTradeEvent,
     ) -> Result<bool> {
         let key = pool_key(&descriptor.program_id, &descriptor.pool);
+        let quote_atoms = event.sol_amount;
+        let Some(priced) = self.strategy_event(slot, &key, descriptor, event).await else {
+            return Ok(false);
+        };
+        let event = &priced;
         let existing = slot.tokens.lock().await.get(&key).cloned();
         let token = if let Some(token) = existing {
             token
         } else if event.trader == slot.target_wallet && event.side == Side::Buy {
+            let quote_mint = pair_quote_mint(descriptor, event);
+            if let Some(code) = slot.quote_pairs.rejects(quote_mint) {
+                tracing::info!(
+                    strategy = slot.name.as_str(),
+                    mint = %descriptor.mint,
+                    quote_mint = quote_mint.unwrap_or(""),
+                    reason = code,
+                    "[03 DETECT] Skipping pair for this strategy"
+                );
+                return Ok(false);
+            }
             if !sol_pair(descriptor, event) {
+                if pump_alt_mint(descriptor, event).is_none() {
+                    tracing::info!(
+                        mint = %descriptor.mint,
+                        quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
+                        "[03 DETECT] Skipping non-SOL pair"
+                    );
+                    return Ok(false);
+                }
                 tracing::info!(
                     mint = %descriptor.mint,
                     quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
-                    "[03 DETECT] Skipping non-SOL pair"
+                    venue = %descriptor.venue,
+                    "[03 DETECT] Alt-quote pair; plugin path"
                 );
-                return Ok(false);
             }
             let engine = self.make_engine(slot);
             let token = Arc::new(Mutex::new(TokenInner::new(
@@ -294,7 +399,7 @@ impl TradingRuntime {
         let (signal, buy_reason, sell_reason, needed, changed, strategy) = {
             let mut state = token.lock().await;
             if event.trader == own_wallet {
-                state.note_own_fill(&event.signature, event.token_amount, event.sol_amount);
+                state.note_own_fill(&event.signature, event.token_amount, quote_atoms);
             }
             if event.trader == slot.target_wallet {
                 state.record_target_trade(event);
@@ -549,7 +654,7 @@ impl TradingRuntime {
             if holding(&state) || !state.claim_buy_send() {
                 return false;
             }
-            if !self.can_open(&state) {
+            if !self.can_open(slot, &state) {
                 state.sell_after_fill = false;
                 state.reset_buy_send_claim();
                 state.engine.on_buy_failed();
@@ -652,7 +757,7 @@ impl TradingRuntime {
         }
     }
 
-    fn can_open(&self, state: &TokenInner) -> bool {
+    fn can_open(&self, slot: &StrategySlot, state: &TokenInner) -> bool {
         let blocked: Vec<&str> = self
             .config
             .blocked_mints
@@ -664,10 +769,21 @@ impl TradingRuntime {
             tracing::warn!(mint = %state.descriptor.mint, "[05 ENTRY] Buy blocked: mint denylist");
             return false;
         }
-        if !crate::venues::ids::is_sol_quote(state.descriptor.quote_mint.as_deref()) {
+        let quote_mint = state.descriptor.quote_mint.as_deref();
+        if let Some(code) = slot.quote_pairs.rejects(quote_mint) {
+            tracing::info!(
+                strategy = slot.name.as_str(),
+                mint = %state.descriptor.mint,
+                quote_mint = quote_mint.unwrap_or(""),
+                reason = code,
+                "[05 ENTRY] Buy skipped: quote pair mode"
+            );
+            return false;
+        }
+        if !crate::venues::ids::is_sol_quote(quote_mint) && !alt_venue(&state.descriptor.venue) {
             tracing::info!(
                 mint = %state.descriptor.mint,
-                quote_mint = state.descriptor.quote_mint.as_deref().unwrap_or(""),
+                quote_mint = quote_mint.unwrap_or(""),
                 "[05 ENTRY] Buy skipped: non-SOL pair"
             );
             return false;
@@ -688,7 +804,15 @@ impl TradingRuntime {
             }
         }
         tracing::info!(mint = %descriptor.mint, pool = %descriptor.pool, venue = %descriptor.venue, "[02 STREAM] Opening pool subscription");
-        let cmd = if descriptor.venue == "pumpswap" {
+        let cmd = if descriptor.venue == "launchlab" {
+            let pool: Pubkey = descriptor.pool.parse()?;
+            GeyserCommand::RegisterCurve {
+                mint,
+                bonding_curve: pool,
+                associated_bonding_curve: pool,
+                associated_quote_bonding_curve: None,
+            }
+        } else if descriptor.venue == "pumpswap" {
             let (base, quote) = self.resolve_amm_vaults(descriptor).await?;
             GeyserCommand::RegisterAmm {
                 mint,
@@ -705,12 +829,23 @@ impl TradingRuntime {
                 .parse()
                 .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
             let associated_bonding_curve = ata(&bonding_curve, &mint, &token_program);
-            let associated_quote_bonding_curve = descriptor
-                .quote_mint
-                .as_deref()
-                .and_then(|q| q.parse::<Pubkey>().ok())
-                .filter(|q| q != &*crate::venues::ids::WSOL_MINT)
-                .map(|quote_mint| ata(&bonding_curve, &quote_mint, &token_program));
+            let associated_quote_bonding_curve = if crate::venues::ids::is_sol_quote(
+                descriptor.quote_mint.as_deref(),
+            ) {
+                None
+            } else {
+                match descriptor.quote_mint.as_deref().and_then(|q| q.parse().ok()) {
+                    Some(quote_mint) => {
+                        let quote_program = self
+                            .quotes
+                            .token_program(&quote_mint)
+                            .await
+                            .unwrap_or(*crate::venues::ids::TOKEN_PROGRAM);
+                        Some(ata(&bonding_curve, &quote_mint, &quote_program))
+                    }
+                    None => None,
+                }
+            };
             GeyserCommand::RegisterCurve {
                 mint,
                 bonding_curve,
@@ -782,6 +917,7 @@ impl TradingRuntime {
         if mint == Pubkey::default() {
             return;
         }
+        self.abandon_alt_quotes(key).await;
         if let Err(err) = self
             .geyser
             .commands
@@ -792,6 +928,62 @@ impl TradingRuntime {
             return;
         }
         tracing::info!(%key, "[02 STREAM] Released pool from gRPC filter");
+    }
+
+    /// No slot still needs the tape. If a wallet is flat, swap leftover quote now and again in 8s.
+    async fn abandon_alt_quotes(&self, key: &str) {
+        for slot in &self.slots {
+            let Some(token) = slot.tokens.lock().await.get(key).cloned() else {
+                continue;
+            };
+            let state = token.lock().await;
+            if holding(&state) || state.had_own_fill || !alt_venue(&state.descriptor.venue) {
+                continue;
+            }
+            let Some(quote) = state
+                .descriptor
+                .quote_mint
+                .as_deref()
+                .filter(|quote| !crate::venues::ids::is_sol_quote(Some(quote)))
+                .and_then(|quote| quote.parse().ok())
+            else {
+                continue;
+            };
+            drop(state);
+            Arc::clone(&slot.execution).spawn_abandon_reclaim(quote);
+        }
+    }
+
+    async fn cache_launchpad(&self, descriptor: &crate::events::PoolDescriptor) {
+        if self.slots[0]
+            .execution
+            .venues
+            .get_launchpad(&descriptor.mint)
+            .is_some()
+        {
+            return;
+        }
+        let Ok(key) = descriptor.pool.parse::<Pubkey>() else {
+            return;
+        };
+        let Ok(account) = self.rpc.get_account(&key).await else {
+            return;
+        };
+        let Ok(state) =
+            crate::venues::launchpad::LaunchpadPoolState::from_account_data(&key, &account.data)
+        else {
+            return;
+        };
+        if state.completed() {
+            self.slots[0]
+                .execution
+                .venues
+                .mark_curve_complete(&descriptor.mint);
+        }
+        self.slots[0]
+            .execution
+            .venues
+            .note_launchpad(&descriptor.mint, state);
     }
 
     async fn recover(&self) -> Result<()> {
@@ -839,10 +1031,21 @@ impl TradingRuntime {
             if matches!(record.lifecycle.as_deref(), Some("CLOSED" | "FAILED")) {
                 continue;
             }
-            if !crate::venues::ids::is_sol_quote(descriptor.quote_mint.as_deref()) {
+            let quote_mint = descriptor.quote_mint.as_deref();
+            if let Some(code) = slot.quote_pairs.rejects(quote_mint) {
+                tracing::info!(
+                    strategy = slot.name.as_str(),
+                    mint = %descriptor.mint,
+                    quote_mint = quote_mint.unwrap_or(""),
+                    reason = code,
+                    "[07 POSITION] Skipping recovery: quote pair mode"
+                );
+                continue;
+            }
+            if !crate::venues::ids::is_sol_quote(quote_mint) && !alt_venue(&descriptor.venue) {
                 tracing::info!(
                     mint = %descriptor.mint,
-                    quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
+                    quote_mint = quote_mint.unwrap_or(""),
                     "[07 POSITION] Skipping recovery of non-SOL pair"
                 );
                 continue;
@@ -1028,8 +1231,14 @@ impl TradingRuntime {
     }
 }
 
-fn sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) -> bool {
-    let quote = descriptor
+fn pump_alt_mint(
+    descriptor: &crate::events::PoolDescriptor,
+    event: &PoolTradeEvent,
+) -> Option<Pubkey> {
+    if !alt_venue(&descriptor.venue) || sol_pair(descriptor, event) {
+        return None;
+    }
+    descriptor
         .quote_mint
         .as_deref()
         .or_else(|| {
@@ -1038,8 +1247,31 @@ fn sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) 
                 .as_ref()
                 .and_then(|curve| curve.quote_mint.as_deref())
         })
-        .or_else(|| event.swap.as_ref().map(|swap| swap.quote_mint.as_str()));
-    crate::venues::ids::is_sol_quote(quote)
+        .and_then(|quote| quote.parse().ok())
+}
+
+fn alt_venue(venue: &str) -> bool {
+    venue == "pump" || venue == "launchlab"
+}
+
+fn pair_quote_mint<'a>(
+    descriptor: &'a crate::events::PoolDescriptor,
+    event: &'a PoolTradeEvent,
+) -> Option<&'a str> {
+    descriptor
+        .quote_mint
+        .as_deref()
+        .or_else(|| {
+            event
+                .curve
+                .as_ref()
+                .and_then(|curve| curve.quote_mint.as_deref())
+        })
+        .or_else(|| event.swap.as_ref().map(|swap| swap.quote_mint.as_str()))
+}
+
+fn sol_pair(descriptor: &crate::events::PoolDescriptor, event: &PoolTradeEvent) -> bool {
+    crate::venues::ids::is_sol_quote(pair_quote_mint(descriptor, event))
 }
 
 fn now_ms() -> u64 {

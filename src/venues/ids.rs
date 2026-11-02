@@ -138,6 +138,18 @@ pub fn pump_global() -> Pubkey {
     pda(&PUMP_PROGRAM, &[b"global"])
 }
 
+/// `Global.buyback_basis_points > 0`. The curve program then requires the
+/// bonding-curve v2 account and one buyback fee recipient, and neither when
+/// the flag is off.
+pub fn parse_pump_buyback(data: &[u8]) -> Option<bool> {
+    // Body layout follows the pump `Global` account. Buyback recipients start
+    // after the cashback flag; the basis points are the next u64.
+    const BASIS_POINTS_AT: usize = 8 + 989;
+    let bytes = data.get(BASIS_POINTS_AT..BASIS_POINTS_AT + 8)?;
+    let basis_points = u64::from_le_bytes(bytes.try_into().ok()?);
+    Some(basis_points > 0)
+}
+
 pub fn pump_event_authority() -> Pubkey {
     pda(&PUMP_PROGRAM, &[b"__event_authority"])
 }
@@ -152,6 +164,11 @@ pub fn pump_global_volume() -> Pubkey {
 
 pub fn pump_user_volume(user: &Pubkey) -> Pubkey {
     pda(&PUMP_PROGRAM, &[b"user_volume_accumulator", user.as_ref()])
+}
+
+/// Fee-program PDA `["sharing-config", base_mint]`. Required by pump `buy_exact_quote_in_v2` / `sell_v2`.
+pub fn sharing_config_pda(mint: &Pubkey) -> Pubkey {
+    pda(&PUMP_FEE_PROGRAM, &[b"sharing-config", mint.as_ref()])
 }
 
 pub fn amm_global_config() -> Pubkey {
@@ -282,7 +299,16 @@ pub fn parse_amm_global_config(data: &[u8]) -> Option<AmmGlobalConfig> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_sol_quote;
+    use super::{is_sol_quote, parse_pump_buyback};
+
+    #[test]
+    fn pump_buyback_flag_is_the_global_basis_points() {
+        let mut off = vec![0u8; 8 + 989 + 8];
+        assert_eq!(parse_pump_buyback(&off), Some(false));
+        off[8 + 989..8 + 997].copy_from_slice(&1u64.to_le_bytes());
+        assert_eq!(parse_pump_buyback(&off), Some(true));
+        assert_eq!(parse_pump_buyback(&[0u8; 16]), None);
+    }
 
     #[test]
     fn sol_quotes_are_native_sol_and_wsol() {

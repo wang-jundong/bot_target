@@ -52,24 +52,30 @@ pub fn parse_transaction(
         .iter()
         .filter_map(|ix| account_keys.get(ix.program_id_index).cloned())
         .collect();
-    let post_token_balances = info
+    let token_balances = |balances: &[yellowstone_grpc_proto::prelude::TokenBalance]| {
+        balances
+            .iter()
+            .map(|balance| TokenBalanceInfo {
+                account_index: balance.account_index as usize,
+                mint: balance.mint.clone(),
+                owner: balance.owner.clone(),
+                program_id: balance.program_id.clone(),
+                amount: balance
+                    .ui_token_amount
+                    .as_ref()
+                    .and_then(|ui| ui.amount.parse().ok())
+                    .unwrap_or(0),
+            })
+            .collect()
+    };
+    let (pre_token_balances, post_token_balances) = info
         .meta
         .as_ref()
         .map(|meta| {
-            meta.post_token_balances
-                .iter()
-                .map(|balance| TokenBalanceInfo {
-                    account_index: balance.account_index as usize,
-                    mint: balance.mint.clone(),
-                    owner: balance.owner.clone(),
-                    program_id: balance.program_id.clone(),
-                    amount: balance
-                        .ui_token_amount
-                        .as_ref()
-                        .and_then(|ui| ui.amount.parse().ok())
-                        .unwrap_or(0),
-                })
-                .collect()
+            (
+                token_balances(&meta.pre_token_balances),
+                token_balances(&meta.post_token_balances),
+            )
         })
         .unwrap_or_default();
     let logs = info
@@ -89,6 +95,7 @@ pub fn parse_transaction(
         logs,
         instructions,
         inner_instructions,
+        pre_token_balances,
         post_token_balances,
         failed: false,
     })
@@ -104,6 +111,11 @@ pub fn account_data(acc: &SubscribeUpdateAccount) -> Option<&[u8]> {
 }
 
 /// Disc (8) + 5×u64 + complete + creator = 81 core bytes (New Folder layout).
+pub fn curve_account_is_complete(data: &[u8]) -> bool {
+    const CORE: usize = 8 + 5 * 8 + 1 + 32;
+    data.len() >= CORE && data[8 + 40] != 0
+}
+
 pub fn bonding_curve_from_account_data(data: &[u8]) -> Option<PumpCurveSnapshot> {
     const CORE: usize = 8 + 5 * 8 + 1 + 32;
     if data.len() < CORE {

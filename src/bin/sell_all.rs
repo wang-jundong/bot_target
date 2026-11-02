@@ -5,6 +5,7 @@ use bot_target::helius::HeliusSender;
 use bot_target::venues::ids::{
     PUMP_BUYBACK_FEE_RECIPIENTS, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, WSOL_MINT, amm_global_config,
     bonding_curve_pda, canonical_pool_pda, parse_amm_global_config, parse_amm_pool,
+    parse_pump_buyback, pump_global,
 };
 use bot_target::venues::trade::{
     build_amm_sell, build_pump_sell, compile_trade, transaction_wire_bytes,
@@ -48,6 +49,12 @@ async fn main() -> anyhow::Result<()> {
         config.helius_sender_url.clone(),
         config.helius_sender_swqos_only,
     );
+    let buyback = rpc
+        .get_account(&pump_global())
+        .await
+        .ok()
+        .and_then(|account| parse_pump_buyback(&account.data))
+        .unwrap_or(true);
     let mut failed = 0usize;
     let mut seen = std::collections::HashSet::new();
     for plan in &config.strategy_plans {
@@ -130,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
                         config.compute_unit_limit.max(400_000),
                         config.priority_fee_lamports,
                         config.helius_tip_lamports,
+                        buyback,
                     )?
                 };
                 let blockhash = rpc.get_latest_blockhash().await?;

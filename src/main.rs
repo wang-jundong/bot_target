@@ -1,3 +1,4 @@
+use bot_target::alt_quote::AltQuote;
 use bot_target::config::load_config;
 use bot_target::execution::{BlockhashCache, LiveExecution};
 use bot_target::geyser::{self, GeyserHandle};
@@ -262,11 +263,32 @@ async fn main() -> anyhow::Result<()> {
         config.blockhash_refresh_ms,
     ));
     blockhashes.spawn();
+    let quotes = Arc::new(AltQuote::new(Arc::clone(&rpc)));
     let venues = Arc::new(Venues::new(
         config.compute_unit_limit,
         config.priority_fee_lamports,
         config.helius_tip_lamports,
     ));
+    if let Err(err) = venues.refresh_buyback(&rpc).await {
+        tracing::warn!(error = %err, "[01 STARTUP] Pump buyback flag unread");
+    } else {
+        tracing::info!(
+            buyback = venues.buyback_enabled(),
+            "[01 STARTUP] Pump buyback accounts"
+        );
+    }
+    {
+        let venues = Arc::clone(&venues);
+        let rpc = Arc::clone(&rpc);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if let Err(err) = venues.refresh_buyback(&rpc).await {
+                    tracing::warn!(error = %err, "[01 STARTUP] Pump buyback refresh failed");
+                }
+            }
+        });
+    }
     let journal = Arc::new(RecoveryJournal::new(config.recovery_path.clone()));
     let pnl = Arc::new(PnlJournal::new(config.pnl_path.clone()));
 
@@ -294,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
             journal: Arc::clone(&journal),
             pnl: Arc::clone(&pnl),
             venues: Arc::clone(&venues),
+            quotes: Arc::clone(&quotes),
         }));
     }
 
@@ -326,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
         rpc,
         geyser,
         journal,
+        quotes,
         executions,
         inbound_rx,
     );

@@ -22,7 +22,8 @@ use crate::events::ParsedTargetTransaction;
 use crate::venues::Venues;
 
 use super::parser::{
-    account_data, account_pubkey, bonding_curve_from_account_data, parse_transaction,
+    account_data, account_pubkey, bonding_curve_from_account_data, curve_account_is_complete,
+    parse_transaction,
     token_account_amount,
 };
 use super::subscribe::{SubscriptionState, build_request};
@@ -313,8 +314,25 @@ fn handle_account_update(
 
     match reserve_ref {
         ReserveAccountRef::Curve { mint } => {
-            if let Some(curve) = bonding_curve_from_account_data(data) {
-                ctx.venues.note_curve(&mint.to_string(), curve);
+            let mint_s = mint.to_string();
+            if let Ok(pool) =
+                crate::venues::launchpad::LaunchpadPoolState::from_account_data(&pubkey, data)
+            {
+                if pool.mint_a == mint {
+                    if pool.completed() {
+                        ctx.venues.mark_curve_complete(&mint_s);
+                    } else {
+                        ctx.venues.mark_curve_live(&mint_s);
+                    }
+                    ctx.venues.note_launchpad(&mint_s, pool);
+                    return;
+                }
+            }
+            if curve_account_is_complete(data) {
+                ctx.venues.mark_curve_complete(&mint_s);
+            } else if let Some(curve) = bonding_curve_from_account_data(data) {
+                ctx.venues.mark_curve_live(&mint_s);
+                ctx.venues.note_curve(&mint_s, curve);
             }
         }
         ReserveAccountRef::AmmVault { mint, is_base } => {
