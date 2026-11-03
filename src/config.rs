@@ -352,7 +352,7 @@ impl StrategyV071Config {
     /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-11-02 update).
     /// The entry clock is 3s through 90s. Market cap is off. Buy pressure is off.
     /// Target-buy volume is the 5s window up to that buy, from 3 SOL through 13 SOL.
-    /// Target-buy age is 30s through 300s from the mint's first print.
+    /// Target-buy age is 30s through 300s from the firehose pump create.
     /// `partial_sell_skip` is on. Sell is 6 buys summing to at least 14 SOL.
     /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
     /// `buy_pressure_s`, `max_buy_pressure`, `target_volume_s`,

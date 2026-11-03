@@ -3,13 +3,14 @@
 //! Same flow as scalpingbot `strategy_v_071.py`, for
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
 //! Knobs from `config/strategy_v_071.json` (2026-11-02).
-//! Age and volume match scalpingbot `strategy_v_071.py`. Volume is buy SOL
-//! plus sell SOL over the last `target_volume_s` up to and including the buy
-//! that opened the cycle. Age is seconds from the mint's first print to that
-//! buy. No earlier print makes the age 0. A value equal to a bound still
-//! buys. A zero clock, market-cap, pressure, volume, age, or hold
-//! bound disables that gate. Max sell is 80% of the bag. A partial sell is a
-//! target sell under that line. One instance per mint.
+//! Age and volume match scalpingbot `strategy_v_071.py` bands. Volume is buy
+//! SOL plus sell SOL over the last `target_volume_s` up to and including the
+//! buy that opened the cycle. Age is seconds from the firehose pump create
+//! stamp to that buy (sibling project `1` getting — no RPC). A missing create
+//! keeps age unknown and blocks. A value equal to a bound still buys. A zero
+//! clock, market-cap, pressure, volume, age, or hold bound disables that gate.
+//! Max sell is 80% of the bag. A partial sell is a target sell under that
+//! line. One instance per mint.
 
 use crate::config::StrategyV071Config;
 use crate::strategy::common::{
@@ -52,7 +53,7 @@ struct FlowState {
     pressure: Vec<(u64, u8, f64)>,
     /// Pre-open curve SOL frozen at cycle open. Zero when the volume band was skipped.
     target_volume: f64,
-    /// Seconds since the pump create we saw. Zero when that create was missing.
+    /// Seconds since the pump create we saw. Zero when the sample left age unknown.
     target_age_s: f64,
     partial_sell: bool,
     tape_ready: bool,
@@ -210,8 +211,8 @@ impl StrategyV071Engine {
     }
 
     /// Print-tape numbers for the cycle that is about to open.
-    /// `None` is 0, the same as a mint whose first print is this buy.
-    /// A non-finite volume or age blocks the cycle when that gate is on.
+    /// `None` is treated as 0. A non-finite volume or age (unknown create)
+    /// blocks the cycle when that gate is on.
     pub fn set_open_tape(&mut self, volume: Option<f64>, age_sec: Option<f64>) {
         self.pending_tape = Some((volume, age_sec));
     }

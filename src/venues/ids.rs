@@ -8,6 +8,12 @@ pub static PUMP_AMM_PROGRAM: LazyLock<Pubkey> =
     LazyLock::new(|| pubkey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"));
 pub static PUMP_FEE_PROGRAM: LazyLock<Pubkey> =
     LazyLock::new(|| pubkey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"));
+
+/// IDL `create` — mint at account index 0.
+pub const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
+/// IDL `create_v2` — mint at account index 0.
+pub const PUMP_CREATE_V2_DISCRIMINATOR: [u8; 8] = [214, 144, 76, 236, 95, 139, 49, 180];
+pub const PUMP_CREATE_MINT_ACCOUNT_INDEX: usize = 0;
 pub static TOKEN_PROGRAM: LazyLock<Pubkey> =
     LazyLock::new(|| pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
 pub static TOKEN_2022_PROGRAM: LazyLock<Pubkey> =

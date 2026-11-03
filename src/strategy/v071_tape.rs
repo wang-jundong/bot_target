@@ -1,13 +1,16 @@
 //! Trade-print tape for v071 volume and age.
 //!
-//! Same numbers as scalpingbot `strategy_v_071.py`. Volume is buy SOL plus
-//! sell SOL over `target_volume_s` up to and including the buy that opened
-//! the cycle. A 0 SOL print is left out. An alt-quote print keeps its quote
-//! atoms; the runtime turns those atoms into SOL with the Jupiter rate before
-//! the band is applied. Age is seconds from the mint's first print to that
-//! buy. No earlier print makes the age 0. A zero-size print is kept so that
-//! buy can still end the window. A birth older than the horizon stays too
-//! old instead of becoming a new first print.
+//! Volume is buy SOL plus sell SOL over `target_volume_s` up to and including
+//! the buy that opened the cycle. A 0 SOL print is left out. An alt-quote print
+//! keeps its quote atoms; the runtime turns those atoms into SOL with the
+//! Jupiter rate before the band is applied. A zero-size print is kept so that
+//! buy can still end the window.
+//!
+//! Age matches sibling project `1`: seconds from the pump `create` /
+//! `create_v2` we saw on the firehose to the cycle-open buy. Launch times are
+//! sticky `Instant` stamps — no RPC. A missing create makes age non-finite
+//! (unknown). A launch older than the keep horizon stays aged-out instead of
+//! becoming a new birth.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
@@ -16,13 +19,16 @@ use std::time::{Duration, Instant};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 
-use crate::events::ParsedTargetTransaction;
+use crate::events::{CompiledIx, ParsedTargetTransaction};
 use crate::venues::decoder;
-use crate::venues::ids::is_sol_quote;
+use crate::venues::ids::{
+    PUMP_CREATE_DISCRIMINATOR, PUMP_CREATE_MINT_ACCOUNT_INDEX, PUMP_CREATE_V2_DISCRIMINATOR,
+    PUMP_PROGRAM, is_sol_quote,
+};
 
 const MAX_MINTS: usize = 8_192;
 const MAX_SAMPLES_PER_MINT: usize = 512;
-const MAX_FIRST_PRINTS: usize = 262_144;
+const MAX_LAUNCHES: usize = 65_536;
 
 #[derive(Debug, Clone)]
 struct Sample {
@@ -36,17 +42,17 @@ struct Sample {
 }
 
 #[derive(Debug, Default)]
-struct Births {
+struct Launches {
     by_mint: HashMap<Pubkey, Instant>,
     by_time: BTreeMap<(Instant, u64), Pubkey>,
     seq: u64,
-    /// Mints whose first print fell off the horizon. A later print must not
-    /// become a new birth, or an old mint looks young enough to buy.
+    /// Mints whose create fell off the horizon. A later stamp must not
+    /// become a new launch, or an old mint looks young enough to buy.
     aged_out: HashSet<Pubkey>,
     aged_order: VecDeque<Pubkey>,
 }
 
-impl Births {
+impl Launches {
     fn remember(&mut self, mint: Pubkey, at: Instant, keep: Duration) {
         self.expire(keep);
         if self.aged_out.contains(&mint) || self.by_mint.contains_key(&mint) {
@@ -64,7 +70,7 @@ impl Births {
         };
         while let Some(first) = self.by_time.keys().next().copied() {
             let too_old = first.0 < horizon;
-            let over = self.by_mint.len() > MAX_FIRST_PRINTS;
+            let over = self.by_mint.len() > MAX_LAUNCHES;
             if !too_old && !over {
                 break;
             }
@@ -80,37 +86,39 @@ impl Births {
         if self.aged_out.insert(mint) {
             self.aged_order.push_back(mint);
         }
-        while self.aged_order.len() > MAX_FIRST_PRINTS {
+        while self.aged_order.len() > MAX_LAUNCHES {
             if let Some(old) = self.aged_order.pop_front() {
                 self.aged_out.remove(&old);
             }
         }
     }
 
+    /// Seconds from create to `open_at`. Non-finite when create was never seen
+    /// or the stamp aged out of the keep window.
     fn age_at(&self, mint: &Pubkey, open_at: Instant) -> f64 {
         if self.aged_out.contains(mint) {
             return f64::NAN;
         }
-        self.by_mint
-            .get(mint)
-            .map(|at| open_at.saturating_duration_since(*at).as_secs_f64())
-            .unwrap_or(0.0)
+        match self.by_mint.get(mint) {
+            Some(at) => open_at.saturating_duration_since(*at).as_secs_f64(),
+            None => f64::NAN,
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct V071Tape {
     inner: Mutex<HashMap<Pubkey, VecDeque<Sample>>>,
-    births: Mutex<Births>,
-    birth_keep: Duration,
+    launches: Mutex<Launches>,
+    launch_keep: Duration,
 }
 
 impl V071Tape {
-    pub fn new(birth_keep: Duration) -> Self {
+    pub fn new(launch_keep: Duration) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
-            births: Mutex::new(Births::default()),
-            birth_keep,
+            launches: Mutex::new(Launches::default()),
+            launch_keep,
         }
     }
 
@@ -168,14 +176,14 @@ impl V071Tape {
         }
     }
 
-    /// Sticky timestamp of the mint's first print. Later prints do not move it.
-    pub fn record_first(&self, mint: Pubkey) {
-        self.record_first_at(mint, Instant::now());
+    /// Firehose: first pump create for this mint. Sticky — later creates ignored.
+    pub fn record_launch(&self, mint: Pubkey) {
+        self.record_launch_at(mint, Instant::now());
     }
 
-    pub fn record_first_at(&self, mint: Pubkey, at: Instant) {
-        let mut births = self.births.lock().unwrap_or_else(|err| err.into_inner());
-        births.remember(mint, at, self.birth_keep);
+    pub fn record_launch_at(&self, mint: Pubkey, at: Instant) {
+        let mut launches = self.launches.lock().unwrap_or_else(|err| err.into_inner());
+        launches.remember(mint, at, self.launch_keep);
     }
 
     /// Quote legs inside the volume window, whether a leg could not be priced,
@@ -183,10 +191,10 @@ impl V071Tape {
     ///
     /// Each leg is `(quote_mint, atoms)`. `None` is native SOL lamports. The
     /// window includes that buy and every sized print in the lookback before
-    /// it. A zero-size print still ends the window. Age is 0 when this buy is
-    /// the first print we saw. Age is non-finite when the birth was older than
-    /// the horizon. Volume is unpriced when this buy's signature is missing,
-    /// so later prints are not counted in its place.
+    /// it. A zero-size print still ends the window. Age is non-finite when the
+    /// pump create was never seen on the firehose (or aged out). Volume is
+    /// unpriced when this buy's signature is missing, so later prints are not
+    /// counted in its place.
     pub fn open_window(
         &self,
         mint: &Pubkey,
@@ -232,46 +240,40 @@ impl V071Tape {
         }
         drop(map);
         let age = {
-            let births = self.births.lock().unwrap_or_else(|err| err.into_inner());
-            births.age_at(mint, open_at)
+            let launches = self.launches.lock().unwrap_or_else(|err| err.into_inner());
+            launches.age_at(mint, open_at)
         };
         (legs, unpriced, age)
     }
 }
 
-/// One page of signature block times, newest first, the way RPC returns them.
-pub enum BirthPage {
-    /// The first confirmed trade time is known.
-    Ready(i64),
-    /// Older pages may still hold the birth. Carries the oldest time so far.
-    More(Option<i64>),
+/// Scan outer + inner ixs for pump `create` / `create_v2`. Returns the mint.
+pub fn pump_create_mint(tx: &ParsedTargetTransaction) -> Option<Pubkey> {
+    if tx.failed {
+        return None;
+    }
+    for ix in tx.instructions.iter().chain(tx.inner_instructions.iter()) {
+        if let Some(mint) = create_mint_from_ix(tx, ix) {
+            return Some(mint);
+        }
+    }
+    None
 }
 
-/// `too_old_before` is `open_ts - max_age` when a max age is set. A block time
-/// at or before that cutoff is old enough to stop paging.
-pub fn absorb_birth_page(
-    oldest: Option<i64>,
-    block_times: &[i64],
-    too_old_before: Option<i64>,
-    reached_start: bool,
-) -> BirthPage {
-    let mut oldest = oldest;
-    for time in block_times {
-        if too_old_before.is_some_and(|cut| *time <= cut) {
-            return BirthPage::Ready(*time);
-        }
-        if oldest.is_none_or(|prior| *time < prior) {
-            oldest = Some(*time);
-        }
+fn create_mint_from_ix(tx: &ParsedTargetTransaction, ix: &CompiledIx) -> Option<Pubkey> {
+    let program = tx.account_keys.get(ix.program_id_index)?.parse::<Pubkey>().ok()?;
+    if program != *PUMP_PROGRAM {
+        return None;
     }
-    if reached_start {
-        match oldest {
-            Some(time) => BirthPage::Ready(time),
-            None => BirthPage::More(None),
-        }
-    } else {
-        BirthPage::More(oldest)
+    if ix.data.len() < 8 {
+        return None;
     }
+    let disc: [u8; 8] = ix.data[..8].try_into().ok()?;
+    if disc != PUMP_CREATE_DISCRIMINATOR && disc != PUMP_CREATE_V2_DISCRIMINATOR {
+        return None;
+    }
+    let mint_i = *ix.accounts.get(PUMP_CREATE_MINT_ACCOUNT_INDEX)?;
+    tx.account_keys.get(mint_i)?.parse().ok()
 }
 
 fn evict_coldest(map: &mut HashMap<Pubkey, VecDeque<Sample>>) {
@@ -291,6 +293,9 @@ fn evict_coldest(map: &mut HashMap<Pubkey, VecDeque<Sample>>) {
 }
 
 pub fn observe(tx: &ParsedTargetTransaction, tape: &V071Tape, keep: Duration) {
+    if let Some(mint) = pump_create_mint(tx) {
+        tape.record_launch(mint);
+    }
     if tx.failed {
         return;
     }
@@ -302,7 +307,6 @@ pub fn observe(tx: &ParsedTargetTransaction, tape: &V071Tape, keep: Duration) {
         let Ok(mint) = trade.descriptor.mint.parse::<Pubkey>() else {
             continue;
         };
-        tape.record_first(mint);
         let atoms = trade.event.sol_amount;
         let quote_mint = trade.descriptor.quote_mint.as_deref().or_else(|| {
             trade
@@ -356,7 +360,7 @@ mod tests {
         let mint = Pubkey::new_from_array([1u8; 32]);
         let keep = Duration::from_secs(60);
         let open_at = Instant::now();
-        book.record_first_at(mint, open_at - Duration::from_secs(30));
+        book.record_launch_at(mint, open_at - Duration::from_secs(30));
         book.push_at(mint, 9.0, sig(1), open_at - Duration::from_secs(8), keep);
         book.push_at(mint, 2.0, sig(2), open_at - Duration::from_secs(3), keep);
         book.push_at(mint, 1.0, sig(3), open_at, keep);
@@ -369,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn no_earlier_print_makes_the_age_zero() {
+    fn missing_create_makes_age_unknown() {
         let book = V071Tape::new(Duration::from_secs(600));
         let mint = Pubkey::new_from_array([2u8; 32]);
         let (legs, unpriced, age) = book.open_window(&mint, Duration::from_secs(5), None);
         assert!(legs.is_empty());
         assert!(!unpriced);
-        assert_eq!(age, 0.0);
+        assert!(!age.is_finite(), "age={age}");
     }
 
     #[test]
@@ -471,29 +475,45 @@ mod tests {
     }
 
     #[test]
-    fn chain_birth_stops_when_the_mint_is_already_too_old() {
-        let open = 1_000_000;
-        let page = absorb_birth_page(None, &[open - 10, open - 400], Some(open - 300), false);
-        assert!(matches!(page, BirthPage::Ready(time) if time == open - 400));
-    }
-
-    #[test]
-    fn chain_birth_is_the_oldest_time_on_the_last_page() {
-        let open = 1_000_000;
-        let page = absorb_birth_page(Some(open - 20), &[open - 40], Some(open - 300), true);
-        assert!(matches!(page, BirthPage::Ready(time) if time == open - 40));
-    }
-
-    #[test]
-    fn an_old_birth_does_not_start_again() {
+    fn an_old_launch_does_not_start_again() {
         let book = V071Tape::new(Duration::from_secs(10));
         let mint = Pubkey::new_from_array([6u8; 32]);
-        book.record_first_at(mint, Instant::now() - Duration::from_secs(30));
+        book.record_launch_at(mint, Instant::now() - Duration::from_secs(30));
         let (_, _, age) = book.open_window(&mint, Duration::from_secs(5), None);
         assert!(!age.is_finite(), "age={age}");
-        book.record_first_at(mint, Instant::now());
+        book.record_launch_at(mint, Instant::now());
         let (_, _, age) = book.open_window(&mint, Duration::from_secs(5), None);
         assert!(!age.is_finite(), "age={age}");
+    }
+
+    #[test]
+    fn create_discriminator_picks_the_mint_account() {
+        let mint = Pubkey::new_from_array([7u8; 32]);
+        let tx = ParsedTargetTransaction {
+            signature: Signature::from([1u8; 64]).to_string(),
+            slot: 1,
+            transaction_index: Some(0),
+            timestamp_ms: 0,
+            account_keys: vec![
+                Pubkey::new_from_array([8u8; 32]).to_string(),
+                PUMP_PROGRAM.to_string(),
+                mint.to_string(),
+            ],
+            program_ids: vec![PUMP_PROGRAM.to_string()],
+            logs: vec![],
+            instructions: vec![CompiledIx {
+                program_id_index: 1,
+                accounts: vec![2],
+                data: PUMP_CREATE_V2_DISCRIMINATOR.to_vec(),
+            }],
+            inner_instructions: vec![],
+            pre_token_balances: vec![],
+            post_token_balances: vec![],
+            pre_balances: vec![],
+            post_balances: vec![],
+            failed: false,
+        };
+        assert_eq!(pump_create_mint(&tx), Some(mint));
     }
 
     fn mint_at(n: u32) -> Pubkey {

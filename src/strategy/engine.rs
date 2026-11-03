@@ -362,7 +362,7 @@ impl Engine {
         }
     }
 
-    /// Seeking with a blocked tape — runtime should re-sample when birth/FX arrives.
+    /// Seeking with a blocked tape — runtime should re-sample when FX arrives.
     pub fn v071_needs_tape_refresh(&self) -> bool {
         match self {
             Self::V071(e) => e.needs_tape_refresh(),

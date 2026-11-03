@@ -9,16 +9,13 @@ use crate::journal::RecoveryJournal;
 use crate::state::{Lifecycle, TokenInner};
 use crate::strategy::engine::Engine;
 use crate::strategy::to_market_event;
-use crate::strategy::v071_tape::{BirthPage, V071Tape, absorb_birth_page};
+use crate::strategy::v071_tape::V071Tape;
 use crate::venues::decoder;
 use crate::venues::ids::ata;
 use anyhow::Result;
 use solana_account_decoder_client_types::UiAccountData;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
-use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature;
 use solana_sdk::signer::Signer;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -45,12 +42,8 @@ pub struct TradingRuntime {
     journal: Arc<RecoveryJournal>,
     quotes: Arc<AltQuote>,
     /// Print tape for v071 age and volume. Present when v071 is running.
+    /// Age is firehose pump-create Instant stamps (no birth RPC).
     tape: Option<Arc<V071Tape>>,
-    /// Mint → first confirmed pool trade (or first-trade sentinel).
-    /// `std` mutex so the detect loop can read it without awaiting.
-    births: std::sync::Mutex<HashMap<Pubkey, CachedBirth>>,
-    /// In-flight RPC birth lookups. One spawn per mint.
-    birth_refreshing: std::sync::Mutex<HashSet<Pubkey>>,
     slots: Vec<Arc<StrategySlot>>,
     /// program:pool → (mint, set of slot names still needing the tape)
     registered: Mutex<HashMap<String, (Pubkey, HashSet<&'static str>)>>,
@@ -96,8 +89,6 @@ impl TradingRuntime {
             journal,
             quotes,
             tape,
-            births: std::sync::Mutex::new(HashMap::new()),
-            birth_refreshing: std::sync::Mutex::new(HashSet::new()),
             slots,
             registered: Mutex::new(HashMap::new()),
             inbound: Mutex::new(Some(inbound)),
@@ -374,7 +365,13 @@ impl TradingRuntime {
                 );
             }
             let engine = self.make_engine(slot);
-            let tape_sample = self.v071_tape_sample(slot, event, descriptor);
+            // Gate buy itself is the cycle open — freeze age/volume to this print.
+            let tape_sample = self.v071_tape_sample(
+                slot,
+                event,
+                &event.signature,
+                event.timestamp_ms,
+            );
             let token = Arc::new(Mutex::new(TokenInner::new(
                 descriptor.clone(),
                 event.clone(),
@@ -418,15 +415,29 @@ impl TradingRuntime {
                 let gate = event.signature == state.target_buy.signature
                     && event.event_index == state.target_buy.event_index;
                 let target_buy = event.trader == slot.target_wallet && event.side == Side::Buy;
-                // Re-sample while seeking with a blocked tape so a background
-                // birth RPC can unlock the cycle without awaiting on detect.
+                // Re-sample while seeking with a blocked tape so background
+                // Jupiter FX (volume) can unlock without awaiting on detect.
                 let retry_blocked = state.engine.v071_needs_tape_refresh();
-                !gate && (!state.engine.is_bound() || target_buy || retry_blocked)
+                let should = !gate && (!state.engine.is_bound() || target_buy || retry_blocked);
+                if !should {
+                    None
+                } else if target_buy {
+                    // New cycle opens on this target buy — freeze to this print.
+                    Some((event.signature.clone(), event.timestamp_ms))
+                } else {
+                    // FX retry (or late bind): keep the recorded gate buy so a
+                    // later pool print cannot inflate age/volume.
+                    Some((
+                        state.target_buy.signature.clone(),
+                        state.target_buy.timestamp_ms,
+                    ))
+                }
             };
-            if prefetch {
-                self.v071_tape_sample(slot, event, descriptor)
-            } else {
-                None
+            match prefetch {
+                Some((open_sig, open_ts_ms)) => {
+                    self.v071_tape_sample(slot, event, &open_sig, open_ts_ms)
+                }
+                None => None,
             }
         } else {
             None
@@ -545,15 +556,18 @@ impl TradingRuntime {
         }
     }
 
-    /// Buy SOL plus sell SOL through this buy, and seconds since the first print.
-    /// Alt-quote atoms are converted with the Jupiter SOL rate before the band.
-    /// Cache-only tape sample. Birth RPC and Jupiter FX refresh in the
-    /// background — never blocks the serial inbound handler.
+    /// Buy SOL plus sell SOL through the cycle-open buy, and seconds from the
+    /// firehose pump-create stamp to that same buy (sibling project `1` age
+    /// getting — Instant launch map, no birth RPC). `open_signature` must be
+    /// the gate buy that opened the cycle so volume/age freeze there.
+    /// Alt-quote atoms use Jupiter FX; missing FX refreshes in the background
+    /// and never blocks the serial inbound handler.
     fn v071_tape_sample(
         self: &Arc<Self>,
         slot: &StrategySlot,
         event: &PoolTradeEvent,
-        _descriptor: &crate::events::PoolDescriptor,
+        open_signature: &str,
+        _open_timestamp_ms: u64,
     ) -> Option<(Option<f64>, Option<f64>)> {
         if slot.name != StrategyName::V071 {
             return None;
@@ -568,35 +582,13 @@ impl TradingRuntime {
         let Ok(mint) = event.mint.parse::<Pubkey>() else {
             return Some((None, None));
         };
-        let signature = event
-            .signature
+        let signature = open_signature
             .parse::<solana_sdk::signature::Signature>()
             .ok();
         let lookback = std::time::Duration::from_secs_f64(cfg.target_volume_s.max(0.0));
-        let (legs, unpriced, _) = tape.open_window(&mint, lookback, signature.as_ref());
-        let age = if age_gate {
-            let open_ts = event.timestamp_ms / 1000;
-            let open_ts = if open_ts > 0 {
-                open_ts as i64
-            } else {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64
-            };
-            match event.pool.parse::<Pubkey>() {
-                Ok(pool) => match self.cached_chain_age(mint, open_ts) {
-                    Some(age) => Some(age),
-                    None => {
-                        self.spawn_birth_refresh(mint, pool, open_ts, cfg.max_target_age_s);
-                        Some(f64::NAN)
-                    }
-                },
-                Err(_) => Some(f64::NAN),
-            }
-        } else {
-            None
-        };
+        let (legs, unpriced, tape_age) = tape.open_window(&mint, lookback, signature.as_ref());
+        // Missing create → NaN (unknown), same as project 1 skipping arm.
+        let age = if age_gate { Some(tape_age) } else { None };
         let volume = if !volume_gate {
             None
         } else if unpriced {
@@ -647,105 +639,6 @@ impl TradingRuntime {
             sol += part;
         }
         sol.is_finite().then_some(sol)
-    }
-
-    /// Seconds from the pool's first confirmed trade to this buy, from cache
-    /// only. `None` means a background RPC is still needed.
-    fn cached_chain_age(&self, mint: Pubkey, open_ts: i64) -> Option<f64> {
-        let births = self.births.lock().unwrap_or_else(|err| err.into_inner());
-        match births.get(&mint).copied() {
-            Some(CachedBirth::Known(time)) => Some(age_between(open_ts, time)),
-            Some(CachedBirth::FirstTrade) => Some(0.0),
-            None => None,
-        }
-    }
-
-    /// Page confirmed signatures off the detect loop. One spawn per mint.
-    fn spawn_birth_refresh(self: &Arc<Self>, mint: Pubkey, pool: Pubkey, open_ts: i64, max_age: f64) {
-        {
-            let mut refreshing = self
-                .birth_refreshing
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            if !refreshing.insert(mint) {
-                return;
-            }
-        }
-        let runtime = Arc::clone(self);
-        tokio::spawn(async move {
-            match runtime.confirmed_birth(&pool, open_ts, max_age).await {
-                Some(ConfirmedBirth::Known(time)) => {
-                    runtime
-                        .births
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .insert(mint, CachedBirth::Known(time));
-                }
-                Some(ConfirmedBirth::Unconfirmed) => {
-                    runtime
-                        .births
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .insert(mint, CachedBirth::FirstTrade);
-                }
-                None => {
-                    tracing::warn!(
-                        mint = %mint,
-                        pool = %pool,
-                        "[04 STRAT] v071 birth RPC failed"
-                    );
-                }
-            }
-            runtime
-                .birth_refreshing
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .remove(&mint);
-        });
-    }
-
-    /// An empty confirmed history means this buy is the first trade. A history
-    /// older than `max_age` stops paging.
-    async fn confirmed_birth(
-        &self,
-        pool: &Pubkey,
-        open_ts: i64,
-        max_age: f64,
-    ) -> Option<ConfirmedBirth> {
-        let too_old_before = (max_age > 0.0).then(|| open_ts.saturating_sub(max_age.ceil() as i64));
-        let mut before = None;
-        let mut oldest = None;
-        for _ in 0..8 {
-            let sigs = self
-                .rpc
-                .get_signatures_for_address_with_config(
-                    pool,
-                    GetConfirmedSignaturesForAddress2Config {
-                        before,
-                        until: None,
-                        limit: Some(1_000),
-                        commitment: Some(CommitmentConfig::confirmed()),
-                    },
-                )
-                .await
-                .ok()?;
-            let times: Vec<i64> = sigs.iter().filter_map(|status| status.block_time).collect();
-            let reached_start = sigs.len() < 1_000;
-            match absorb_birth_page(oldest, &times, too_old_before, reached_start) {
-                BirthPage::Ready(time) => return Some(ConfirmedBirth::Known(time)),
-                BirthPage::More(None) if reached_start => return Some(ConfirmedBirth::Unconfirmed),
-                BirthPage::More(next) => {
-                    oldest = next;
-                    before = sigs
-                        .last()
-                        .and_then(|status| status.signature.parse::<Signature>().ok());
-                    if before.is_none() {
-                        return None;
-                    }
-                }
-            }
-        }
-        None
     }
 
     async fn mark_pool_needed(
@@ -1491,27 +1384,6 @@ impl TradingRuntime {
                 .send(GeyserCommand::Unregister { mint })
                 .await;
         }
-    }
-}
-
-enum ConfirmedBirth {
-    Known(i64),
-    /// No confirmed signature yet. This buy is the first trade.
-    Unconfirmed,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum CachedBirth {
-    Known(i64),
-    /// RPC found no older confirmed trade — age is 0.
-    FirstTrade,
-}
-
-fn age_between(open_ts: i64, birth: i64) -> f64 {
-    if birth >= open_ts {
-        0.0
-    } else {
-        (open_ts - birth) as f64
     }
 }
 
