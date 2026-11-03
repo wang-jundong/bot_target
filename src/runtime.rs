@@ -46,8 +46,11 @@ pub struct TradingRuntime {
     quotes: Arc<AltQuote>,
     /// Print tape for v071 age and volume. Present when v071 is running.
     tape: Option<Arc<V071Tape>>,
-    /// Mint → unix time of the first confirmed pool trade.
-    births: Mutex<HashMap<Pubkey, i64>>,
+    /// Mint → first confirmed pool trade (or first-trade sentinel).
+    /// `std` mutex so the detect loop can read it without awaiting.
+    births: std::sync::Mutex<HashMap<Pubkey, CachedBirth>>,
+    /// In-flight RPC birth lookups. One spawn per mint.
+    birth_refreshing: std::sync::Mutex<HashSet<Pubkey>>,
     slots: Vec<Arc<StrategySlot>>,
     /// program:pool → (mint, set of slot names still needing the tape)
     registered: Mutex<HashMap<String, (Pubkey, HashSet<&'static str>)>>,
@@ -93,7 +96,8 @@ impl TradingRuntime {
             journal,
             quotes,
             tape,
-            births: Mutex::new(HashMap::new()),
+            births: std::sync::Mutex::new(HashMap::new()),
+            birth_refreshing: std::sync::Mutex::new(HashSet::new()),
             slots,
             registered: Mutex::new(HashMap::new()),
             inbound: Mutex::new(Some(inbound)),
@@ -264,6 +268,9 @@ impl TradingRuntime {
     /// SOL pairs pass through. A fresh Jupiter rate rewrites an alt-quote print
     /// into SOL. A missing rate keeps the print and refreshes in the background.
     /// An open pair keeps its last mark so a target sell still fires.
+    ///
+    /// Never awaits RPC/HTTP — FX and mint meta refresh off-thread so SOL
+    /// decisions on the serial inbound loop stay fast.
     async fn strategy_event(
         self: &Arc<Self>,
         slot: &StrategySlot,
@@ -276,25 +283,17 @@ impl TradingRuntime {
         };
         let mut priced = event.clone();
         if descriptor.venue == "launchlab" {
-            self.cache_launchpad(descriptor).await;
+            self.spawn_cache_launchpad(descriptor.clone());
         }
-        match self
+        if self
             .quotes
             .scale_from_cache(&quote_mint, &mut priced.sol_amount, &mut priced.price)
-            .await
         {
-            Ok(true) => Some(priced),
-            Ok(false) => {
-                self.quotes.spawn_fx_refresh(quote_mint);
-                self.keep_unpriced_alt_print(slot, key, descriptor, priced, None)
-                    .await
-            }
-            Err(err) => {
-                self.quotes.spawn_fx_refresh(quote_mint);
-                self.keep_unpriced_alt_print(slot, key, descriptor, priced, Some(err))
-                    .await
-            }
+            return Some(priced);
         }
+        self.quotes.spawn_quote_ready(quote_mint);
+        self.keep_unpriced_alt_print(slot, key, descriptor, priced, None)
+            .await
     }
 
     /// Missing SOL rate. An open pair keeps its last mark and ignores this
@@ -357,14 +356,16 @@ impl TradingRuntime {
                 return Ok(false);
             }
             if !sol_pair(descriptor, event) {
-                if pump_alt_mint(descriptor, event).is_none() {
+                let Some(alt_mint) = pump_alt_mint(descriptor, event) else {
                     tracing::info!(
                         mint = %descriptor.mint,
                         quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
                         "[03 DETECT] Skipping non-SOL pair"
                     );
                     return Ok(false);
-                }
+                };
+                // Warm FX + mint meta before the next prints hit the seek window.
+                self.quotes.spawn_quote_ready(alt_mint);
                 tracing::info!(
                     mint = %descriptor.mint,
                     quote_mint = descriptor.quote_mint.as_deref().unwrap_or(""),
@@ -373,7 +374,7 @@ impl TradingRuntime {
                 );
             }
             let engine = self.make_engine(slot);
-            let tape_sample = self.v071_tape_sample(slot, event, descriptor).await;
+            let tape_sample = self.v071_tape_sample(slot, event, descriptor);
             let token = Arc::new(Mutex::new(TokenInner::new(
                 descriptor.clone(),
                 event.clone(),
@@ -417,10 +418,13 @@ impl TradingRuntime {
                 let gate = event.signature == state.target_buy.signature
                     && event.event_index == state.target_buy.event_index;
                 let target_buy = event.trader == slot.target_wallet && event.side == Side::Buy;
-                !gate && (!state.engine.is_bound() || target_buy)
+                // Re-sample while seeking with a blocked tape so a background
+                // birth RPC can unlock the cycle without awaiting on detect.
+                let retry_blocked = state.engine.v071_needs_tape_refresh();
+                !gate && (!state.engine.is_bound() || target_buy || retry_blocked)
             };
             if prefetch {
-                self.v071_tape_sample(slot, event, descriptor).await
+                self.v071_tape_sample(slot, event, descriptor)
             } else {
                 None
             }
@@ -478,11 +482,9 @@ impl TradingRuntime {
                 state
                     .engine
                     .bind_gate(&slot.target_wallet, 0.0, price, sol, &gate_sig, gate_ts);
-            }
-            if event.trader == slot.target_wallet && event.side == Side::Buy {
-                if let Some((volume, age)) = tape_sample {
-                    state.engine.set_v071_open_tape(volume, age);
-                }
+            } else if let Some((volume, age)) = tape_sample {
+                // Target rebuy, or a blocked seek waiting on background birth/FX.
+                state.engine.set_v071_open_tape(volume, age);
             }
             let before = state.engine.phase_name();
             let market = to_market_event(event);
@@ -545,8 +547,10 @@ impl TradingRuntime {
 
     /// Buy SOL plus sell SOL through this buy, and seconds since the first print.
     /// Alt-quote atoms are converted with the Jupiter SOL rate before the band.
-    async fn v071_tape_sample(
-        &self,
+    /// Cache-only tape sample. Birth RPC and Jupiter FX refresh in the
+    /// background — never blocks the serial inbound handler.
+    fn v071_tape_sample(
+        self: &Arc<Self>,
         slot: &StrategySlot,
         event: &PoolTradeEvent,
         _descriptor: &crate::events::PoolDescriptor,
@@ -581,10 +585,13 @@ impl TradingRuntime {
                     .as_secs() as i64
             };
             match event.pool.parse::<Pubkey>() {
-                Ok(pool) => self
-                    .chain_age(mint, pool, open_ts, cfg.max_target_age_s)
-                    .await
-                    .or(Some(f64::NAN)),
+                Ok(pool) => match self.cached_chain_age(mint, open_ts) {
+                    Some(age) => Some(age),
+                    None => {
+                        self.spawn_birth_refresh(mint, pool, open_ts, cfg.max_target_age_s);
+                        Some(f64::NAN)
+                    }
+                },
                 Err(_) => Some(f64::NAN),
             }
         } else {
@@ -599,7 +606,7 @@ impl TradingRuntime {
             );
             Some(f64::NAN)
         } else {
-            match self.volume_legs_to_sol(&legs).await {
+            match self.volume_legs_to_sol(&legs) {
                 Some(sol) => Some(sol),
                 None => {
                     tracing::warn!(
@@ -619,13 +626,20 @@ impl TradingRuntime {
         Some((volume, age))
     }
 
-    /// Sum window legs as SOL. A missing alt-quote rate makes the whole sum unknown.
-    async fn volume_legs_to_sol(&self, legs: &[(Option<Pubkey>, u64)]) -> Option<f64> {
+    /// Sum window legs as SOL from cache only. Missing FX/meta refreshes in the
+    /// background and makes the whole sum unknown — never awaits Jupiter/RPC.
+    fn volume_legs_to_sol(&self, legs: &[(Option<Pubkey>, u64)]) -> Option<f64> {
         let mut sol = 0.0;
         for (quote, atoms) in legs {
             let part = match quote {
                 None => *atoms as f64 / 1_000_000_000.0,
-                Some(quote) => self.quotes.quote_atoms_to_sol(quote, *atoms).await.ok()?,
+                Some(quote) => match self.quotes.quote_atoms_to_sol_cached(quote, *atoms) {
+                    Some(part) => part,
+                    None => {
+                        self.quotes.spawn_quote_ready(*quote);
+                        return None;
+                    }
+                },
             };
             if !part.is_finite() {
                 return None;
@@ -635,32 +649,63 @@ impl TradingRuntime {
         sol.is_finite().then_some(sol)
     }
 
-    /// Seconds from the pool's first confirmed trade to this buy.
-    ///
-    /// An empty confirmed history means this buy is the first trade, so the
-    /// age is 0. A history older than `max_age` stops paging. No cached birth
-    /// is stored until a block time is actually found.
-    async fn chain_age(
-        &self,
-        mint: Pubkey,
-        pool: Pubkey,
-        open_ts: i64,
-        max_age: f64,
-    ) -> Option<f64> {
-        {
-            let births = self.births.lock().await;
-            if let Some(birth) = births.get(&mint).copied() {
-                return Some(age_between(open_ts, birth));
-            }
+    /// Seconds from the pool's first confirmed trade to this buy, from cache
+    /// only. `None` means a background RPC is still needed.
+    fn cached_chain_age(&self, mint: Pubkey, open_ts: i64) -> Option<f64> {
+        let births = self.births.lock().unwrap_or_else(|err| err.into_inner());
+        match births.get(&mint).copied() {
+            Some(CachedBirth::Known(time)) => Some(age_between(open_ts, time)),
+            Some(CachedBirth::FirstTrade) => Some(0.0),
+            None => None,
         }
-        let birth = self.confirmed_birth(&pool, open_ts, max_age).await?;
-        if let ConfirmedBirth::Known(time) = birth {
-            self.births.lock().await.insert(mint, time);
-            return Some(age_between(open_ts, time));
-        }
-        Some(0.0)
     }
 
+    /// Page confirmed signatures off the detect loop. One spawn per mint.
+    fn spawn_birth_refresh(self: &Arc<Self>, mint: Pubkey, pool: Pubkey, open_ts: i64, max_age: f64) {
+        {
+            let mut refreshing = self
+                .birth_refreshing
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if !refreshing.insert(mint) {
+                return;
+            }
+        }
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            match runtime.confirmed_birth(&pool, open_ts, max_age).await {
+                Some(ConfirmedBirth::Known(time)) => {
+                    runtime
+                        .births
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .insert(mint, CachedBirth::Known(time));
+                }
+                Some(ConfirmedBirth::Unconfirmed) => {
+                    runtime
+                        .births
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .insert(mint, CachedBirth::FirstTrade);
+                }
+                None => {
+                    tracing::warn!(
+                        mint = %mint,
+                        pool = %pool,
+                        "[04 STRAT] v071 birth RPC failed"
+                    );
+                }
+            }
+            runtime
+                .birth_refreshing
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .remove(&mint);
+        });
+    }
+
+    /// An empty confirmed history means this buy is the first trade. A history
+    /// older than `max_age` stops paging.
     async fn confirmed_birth(
         &self,
         pool: &Pubkey,
@@ -1156,6 +1201,22 @@ impl TradingRuntime {
         }
     }
 
+    /// Kick LaunchLab pool RPC off the detect loop when the mint is not cached yet.
+    fn spawn_cache_launchpad(self: &Arc<Self>, descriptor: crate::events::PoolDescriptor) {
+        if self.slots[0]
+            .execution
+            .venues
+            .get_launchpad(&descriptor.mint)
+            .is_some()
+        {
+            return;
+        }
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime.cache_launchpad(&descriptor).await;
+        });
+    }
+
     async fn cache_launchpad(&self, descriptor: &crate::events::PoolDescriptor) {
         if self.slots[0]
             .execution
@@ -1437,6 +1498,13 @@ enum ConfirmedBirth {
     Known(i64),
     /// No confirmed signature yet. This buy is the first trade.
     Unconfirmed,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CachedBirth {
+    Known(i64),
+    /// RPC found no older confirmed trade — age is 0.
+    FirstTrade,
 }
 
 fn age_between(open_ts: i64, birth: i64) -> f64 {

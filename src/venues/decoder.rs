@@ -1,7 +1,8 @@
 use super::ids::{
     PUMP_AMM_PROGRAM, PUMP_FEE_PROGRAM, PUMP_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
     amm_event_authority, amm_fee_config, amm_global_config, amm_global_volume, amm_user_volume,
-    ata, bonding_curve_pda, coin_creator_vault_authority, is_pump_fee_recipient, pool_v2_pda,
+    ata, bonding_curve_pda, coin_creator_vault_authority, is_pump_fee_recipient, is_sol_quote,
+    pool_v2_pda,
 };
 use crate::events::{
     CompiledIx, ParsedTargetTransaction, PoolDescriptor, PoolTradeEvent, PumpCurveSnapshot,
@@ -210,31 +211,35 @@ fn pump_trade(tx: &ParsedTargetTransaction, body: &[u8], event_index: u32) -> Op
         }
     }
     let quote_mint = c.pubkey();
-    let _quote_amount = c.u64();
+    let quote_amount = c.u64();
     let virtual_quote = c.u64();
     let mint_s = mint.to_string();
     let pool = bonding_curve_pda(&mint).to_string();
     let token_program = token_program_for(tx, &mint_s);
+    let quote_mint_s = quote_mint.map(|k| k.to_string());
     let descriptor = PoolDescriptor {
         mint: mint_s.clone(),
         pool: pool.clone(),
         program_id: PUMP_PROGRAM.to_string(),
         venue: "pump".to_string(),
         token_program,
-        quote_mint: quote_mint.map(|k| k.to_string()),
+        quote_mint: quote_mint_s.clone(),
         pool_base_token_account: None,
         pool_quote_token_account: None,
         relevant_accounts: vec![pool.clone(), mint_s.clone()],
     };
     let quote_reserves = virtual_quote.filter(|v| *v > 0).unwrap_or(virtual_sol);
     let price = ratio(quote_reserves, virtual_token);
+    // Alt curves report size in quote_amount (sol_amount is 0). Runtime FX
+    // scales those quote atoms into SOL lamports for strategy sizing.
+    let sized_amount = pump_trade_size(sol_amount, quote_mint_s.as_deref(), quote_amount);
     let mut event = base_event(
         tx,
         event_index,
         &descriptor,
         &user.to_string(),
         is_buy,
-        sol_amount,
+        sized_amount,
         token_amount,
         price,
         None,
@@ -638,4 +643,56 @@ pub fn program_ids(account_keys: &[String], instructions: &[CompiledIx]) -> Vec<
         .iter()
         .filter_map(|ix| account_keys.get(ix.program_id_index).cloned())
         .collect()
+}
+
+/// SOL curves keep `sol_amount`. Non-SOL curves keep `quote_amount` atoms so
+/// `AltQuote::scale_from_cache` can rewrite them into SOL lamports.
+fn pump_trade_size(sol_amount: u64, quote_mint: Option<&str>, quote_amount: Option<u64>) -> u64 {
+    match (quote_mint, quote_amount) {
+        (quote, Some(atoms)) if atoms > 0 && !is_sol_quote(quote) => atoms,
+        _ => sol_amount,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pump_trade_size;
+
+    #[test]
+    fn sol_curves_keep_sol_amount() {
+        assert_eq!(
+            pump_trade_size(1_500_000_000, Some("11111111111111111111111111111111"), Some(0)),
+            1_500_000_000
+        );
+        assert_eq!(
+            pump_trade_size(
+                1_500_000_000,
+                Some("So11111111111111111111111111111111111111112"),
+                Some(99),
+            ),
+            1_500_000_000
+        );
+        assert_eq!(pump_trade_size(1_500_000_000, None, None), 1_500_000_000);
+    }
+
+    #[test]
+    fn alt_curves_use_quote_amount_atoms() {
+        assert_eq!(
+            pump_trade_size(
+                0,
+                Some("DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF"),
+                Some(45_953_295),
+            ),
+            45_953_295
+        );
+        // Missing/zero quote_amount falls back to sol_amount.
+        assert_eq!(
+            pump_trade_size(0, Some("DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF"), Some(0)),
+            0
+        );
+        assert_eq!(
+            pump_trade_size(0, Some("DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF"), None),
+            0
+        );
+    }
 }

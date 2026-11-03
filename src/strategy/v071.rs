@@ -216,6 +216,12 @@ impl StrategyV071Engine {
         self.pending_tape = Some((volume, age_sec));
     }
 
+    /// True while seek/pending is blocked waiting for age/volume to become known.
+    pub fn needs_tape_refresh(&self) -> bool {
+        self.st.tape_blocked
+            && matches!(self.st.phase, PHASE_SEEK_SELL | PHASE_PENDING)
+    }
+
     pub fn on_buy_fill(&mut self, fill_px: f64, held_since_ms: u64) {
         if fill_px > 0.0 {
             self.st.entry_px = fill_px;
@@ -632,6 +638,11 @@ impl StrategyV071Engine {
             self.take_open_tape();
             clear_streak(&mut self.st);
             return None;
+        }
+
+        // Birth/FX may land after bind; re-apply a fresher sample to unblock seek.
+        if self.st.tape_blocked && self.pending_tape.is_some() {
+            self.take_open_tape();
         }
 
         if self.st.phase == PHASE_SEEK_SELL

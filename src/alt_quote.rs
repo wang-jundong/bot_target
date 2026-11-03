@@ -76,6 +76,7 @@ pub struct AltQuote {
     fx: Mutex<HashMap<Pubkey, FxEntry>>,
     fx_refreshing: Mutex<HashSet<Pubkey>>,
     meta: Mutex<HashMap<Pubkey, QuoteMeta>>,
+    meta_refreshing: Mutex<HashSet<Pubkey>>,
 }
 
 impl AltQuote {
@@ -90,11 +91,18 @@ impl AltQuote {
             fx: Mutex::new(HashMap::new()),
             fx_refreshing: Mutex::new(HashSet::new()),
             meta: Mutex::new(HashMap::new()),
+            meta_refreshing: Mutex::new(HashSet::new()),
         }
     }
 
     pub async fn token_program(&self, quote_mint: &Pubkey) -> Result<Pubkey> {
         Ok(self.ensure_meta(quote_mint).await?.token_program)
+    }
+
+    /// Cached mint decimals / token program. Missing means a background fetch
+    /// is needed; the detect loop must not await that RPC.
+    fn cached_meta(&self, quote_mint: &Pubkey) -> Option<QuoteMeta> {
+        self.meta.lock().expect("meta").get(quote_mint).cloned()
     }
 
     /// Fresh cached SOL-per-quote. A missing or stale rate is `None`; the caller
@@ -134,21 +142,62 @@ impl AltQuote {
         });
     }
 
-    /// Scale from the cached rate only. `Ok(false)` means the rate is missing
-    /// or stale, so the print stays as it arrived.
-    pub async fn scale_from_cache(
+    /// One mint-account fetch per quote while a refresh is already running.
+    pub fn spawn_meta_refresh(self: &Arc<Self>, quote_mint: Pubkey) {
+        {
+            let mut refreshing = self.meta_refreshing.lock().expect("meta refresh");
+            if !refreshing.insert(quote_mint) {
+                return;
+            }
+        }
+        let quotes = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(err) = quotes.ensure_meta(&quote_mint).await {
+                tracing::warn!(
+                    error = %err,
+                    quote = %quote_mint,
+                    "[03 DETECT] Quote meta refresh failed"
+                );
+            }
+            quotes
+                .meta_refreshing
+                .lock()
+                .expect("meta refresh")
+                .remove(&quote_mint);
+        });
+    }
+
+    /// Prefetch FX + mint meta off the detect loop (gate buy / first print).
+    pub fn spawn_quote_ready(self: &Arc<Self>, quote_mint: Pubkey) {
+        self.spawn_fx_refresh(quote_mint);
+        self.spawn_meta_refresh(quote_mint);
+    }
+
+    /// Scale from the cached rate + mint meta only. `false` means FX or meta is
+    /// missing; the caller keeps the print and refreshes in the background.
+    /// Never RPCs — safe on the serial inbound handler.
+    pub fn scale_from_cache(
         &self,
         quote_mint: &Pubkey,
         atoms: &mut u64,
         price: &mut f64,
-    ) -> Result<bool> {
+    ) -> bool {
         let Some(fx) = self.fresh_sol_per_quote(quote_mint) else {
-            return Ok(false);
+            return false;
         };
-        let meta = self.ensure_meta(quote_mint).await?;
+        let Some(meta) = self.cached_meta(quote_mint) else {
+            return false;
+        };
         *atoms = lamports_from_quote_atoms(*atoms, fx, meta.decimals);
         *price = scale_price(*price, fx, meta.decimals);
-        Ok(true)
+        true
+    }
+
+    /// Quote atoms as SOL from cache only. `None` means FX/meta is missing.
+    pub fn quote_atoms_to_sol_cached(&self, quote_mint: &Pubkey, atoms: u64) -> Option<f64> {
+        let fx = self.fresh_sol_per_quote(quote_mint)?;
+        let meta = self.cached_meta(quote_mint)?;
+        Some(lamports_from_quote_atoms(atoms, fx, meta.decimals) as f64 / 1_000_000_000.0)
     }
 
     /// Quote atoms as SOL, using the cached Jupiter rate or fetching one.
@@ -682,6 +731,40 @@ mod tests {
             solana_client::nonblocking::rpc_client::RpcClient::new("http://127.0.0.1:8899".into()),
         ));
         assert!(quotes.fresh_sol_per_quote(&Pubkey::new_unique()).is_none());
+    }
+
+    #[test]
+    fn scale_from_cache_needs_both_fx_and_meta() {
+        let quotes = AltQuote::new(std::sync::Arc::new(
+            solana_client::nonblocking::rpc_client::RpcClient::new("http://127.0.0.1:8899".into()),
+        ));
+        let quote = Pubkey::new_unique();
+        let mut atoms = 1_000_000u64;
+        let mut price = 1_000.0;
+        assert!(!quotes.scale_from_cache(&quote, &mut atoms, &mut price));
+        assert_eq!(atoms, 1_000_000);
+
+        quotes.fx.lock().expect("fx").insert(
+            quote,
+            FxEntry {
+                sol_per_quote: 0.005,
+                at: Instant::now(),
+            },
+        );
+        // FX alone is not enough — mint meta must already be cached.
+        assert!(!quotes.scale_from_cache(&quote, &mut atoms, &mut price));
+
+        quotes.meta.lock().expect("meta").insert(
+            quote,
+            QuoteMeta {
+                decimals: 6,
+                token_program: *ids::TOKEN_PROGRAM,
+            },
+        );
+        assert!(quotes.scale_from_cache(&quote, &mut atoms, &mut price));
+        assert_eq!(atoms, 5_000_000);
+        assert!((price - 5_000.0).abs() < 1e-6);
+        assert_eq!(quotes.quote_atoms_to_sol_cached(&quote, 1_000_000), Some(0.005));
     }
 
     #[test]

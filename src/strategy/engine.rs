@@ -362,6 +362,14 @@ impl Engine {
         }
     }
 
+    /// Seeking with a blocked tape — runtime should re-sample when birth/FX arrives.
+    pub fn v071_needs_tape_refresh(&self) -> bool {
+        match self {
+            Self::V071(e) => e.needs_tape_refresh(),
+            _ => false,
+        }
+    }
+
     /// Process a non-gate pool print. Returns BUY/SELL when the engine fires.
     pub fn on_event(&mut self, event: &MarketEvent, holding: bool) -> Option<&'static str> {
         match self {
