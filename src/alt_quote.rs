@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 const JUPITER_PRICE: &str = "https://api.jup.ag/price/v3";
 const JUPITER_BUILD: &str = "https://api.jup.ag/swap/v2/build";
 const WSOL: &str = "So11111111111111111111111111111111111111112";
-/// 50% slippage, so the curve spends the minimum the SOL→quote hop can still deliver.
-pub const JUPITER_BUY_SLIPPAGE_BPS: u16 = 5_000;
+pub const JUPITER_BUY_SLIPPAGE_BPS: u16 = 50;
 /// 1% slippage when swapping leftover quote back to SOL.
 pub const JUPITER_RECLAIM_SLIPPAGE_BPS: u16 = 100;
 /// 100% slippage when the curve has migrated and the bag is sold through Jupiter.
