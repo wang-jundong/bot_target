@@ -384,7 +384,7 @@ impl StrategyV071Config {
             second_buy_exit: false,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.2,
+            size_sol: 0.5,
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
@@ -659,7 +659,7 @@ impl StrategyV131Config {
             second_buy_exit: false,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.3,
+            size_sol: 0.6,
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
