@@ -1236,7 +1236,10 @@ impl LiveExecution {
             let prepared = crate::state::PreparedTrade {
                 instructions,
                 payer: self.wallet.pubkey(),
-                compute_unit_limit: self.venues.compute_unit_limit,
+                compute_unit_limit: self
+                    .venues
+                    .compute_unit_limit
+                    .max(crate::alt_quote::ALT_COMPUTE_UNIT_LIMIT),
                 priority_fee_lamports: self.venues.priority_fee_lamports,
                 tip_lamports: self.venues.tip_lamports,
             };
@@ -1541,7 +1544,11 @@ impl LiveExecution {
                 .map(|instructions| crate::state::PreparedTrade {
                     instructions,
                     payer: self.wallet.pubkey(),
-                    compute_unit_limit: self.venues.compute_unit_limit,
+                    // Alt sells need the same CU headroom as alt buys (ATA + SellV2/LaunchLab).
+                    compute_unit_limit: self
+                        .venues
+                        .compute_unit_limit
+                        .max(crate::alt_quote::ALT_COMPUTE_UNIT_LIMIT),
                     priority_fee_lamports: self.venues.priority_fee_lamports,
                     tip_lamports: self.venues.tip_lamports,
                 })
@@ -1586,7 +1593,9 @@ impl LiveExecution {
                     amount,
                     slippage,
                     &curve,
-                    self.venues.compute_unit_limit,
+                    self.venues
+                        .compute_unit_limit
+                        .max(crate::alt_quote::ALT_COMPUTE_UNIT_LIMIT),
                     self.venues.priority_fee_lamports,
                     self.venues.tip_lamports,
                 )

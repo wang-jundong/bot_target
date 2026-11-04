@@ -35,6 +35,8 @@ pub const IX_POOL_ACCOUNT_INDEX: usize = 4;
 pub const IX_VAULT_B_ACCOUNT_INDEX: usize = 8;
 pub const IX_MINT_A_ACCOUNT_INDEX: usize = 9;
 pub const IX_MINT_B_ACCOUNT_INDEX: usize = 10;
+/// `mint_a` pubkey offset in the LaunchLab pool account body (after 8-byte disc).
+pub const POOL_MINT_A_OFFSET: usize = 205;
 const POOL_MINT_B_OFFSET: usize = 237;
 
 /// Quote atoms of one LaunchLab print.
