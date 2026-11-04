@@ -117,7 +117,9 @@ pub struct StrategyV071Engine {
     last_px: f64,
     exit_retry: bool,
     exit_retry_at_ms: u64,
-    /// `(volume, age)` for the next cycle open. Volume `None` skips that band.
+    /// `(volume, age)` for the next cycle open.
+    /// Volume `None` skips the volume band (age can still gate). Age `None` /
+    /// non-finite blocks when the age gate is on.
     pending_tape: Option<(Option<f64>, Option<f64>)>,
 }
 
@@ -211,8 +213,8 @@ impl StrategyV071Engine {
     }
 
     /// Print-tape numbers for the cycle that is about to open.
-    /// `None` is treated as 0. A non-finite volume or age (unknown create)
-    /// blocks the cycle when that gate is on.
+    /// Volume `None` skips the volume band. A non-finite volume (when `Some`)
+    /// or age (unknown create) blocks the cycle when that gate is on.
     pub fn set_open_tape(&mut self, volume: Option<f64>, age_sec: Option<f64>) {
         self.pending_tape = Some((volume, age_sec));
     }
@@ -413,19 +415,28 @@ impl StrategyV071Engine {
             return;
         };
         self.st.tape_ready = true;
-        let vol = volume.unwrap_or(0.0);
         let age_sec = age.unwrap_or(0.0);
-        let vol_known = vol.is_finite() && vol >= 0.0;
         let age_known = age_sec.is_finite() && age_sec >= 0.0;
-        self.st.target_volume = if vol_known { vol } else { 0.0 };
         self.st.target_age_s = if age_known { age_sec } else { 0.0 };
         let mut blocked = false;
-        if self.volume_gate_on()
-            && (!vol_known
-                || (self.cfg.min_target_volume_sol > 0.0 && vol < self.cfg.min_target_volume_sol)
-                || (self.cfg.max_target_volume_sol > 0.0 && vol > self.cfg.max_target_volume_sol))
-        {
-            blocked = true;
+        match volume {
+            // Skip the volume band (non-SOL runtime passes `None`; SOL passes `Some`).
+            None => {
+                self.st.target_volume = 0.0;
+            }
+            Some(vol) => {
+                let vol_known = vol.is_finite() && vol >= 0.0;
+                self.st.target_volume = if vol_known { vol } else { 0.0 };
+                if self.volume_gate_on()
+                    && (!vol_known
+                        || (self.cfg.min_target_volume_sol > 0.0
+                            && vol < self.cfg.min_target_volume_sol)
+                        || (self.cfg.max_target_volume_sol > 0.0
+                            && vol > self.cfg.max_target_volume_sol))
+                {
+                    blocked = true;
+                }
+            }
         }
         if self.age_gate_on()
             && (!age_known
@@ -831,7 +842,7 @@ mod tests {
         assert!(loaded.target_sell_exit);
         assert!(!loaded.second_buy_exit);
         assert!(!loaded.repeat_entries);
-        assert_eq!(loaded.size_sol, 0.2);
+        assert_eq!(loaded.size_sol, 0.6);
     }
 
     #[test]
@@ -1221,8 +1232,9 @@ mod tests {
         let mut empty = open_with(None, Some(60.0));
         assert_eq!(
             empty.on_event(&print("BUY", 1.0, "no-volume", T0 + 3_000)),
-            None
+            Some("BUY")
         );
+        assert_eq!(empty.last_buy_diag().target_volume, 0.0);
 
         let mut unpriced = open_with(Some(f64::NAN), Some(60.0));
         assert_eq!(

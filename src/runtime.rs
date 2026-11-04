@@ -368,6 +368,7 @@ impl TradingRuntime {
             // Gate buy itself is the cycle open — freeze age/volume to this print.
             let tape_sample = self.v071_tape_sample(
                 slot,
+                descriptor,
                 event,
                 &event.signature,
                 event.timestamp_ms,
@@ -435,7 +436,7 @@ impl TradingRuntime {
             };
             match prefetch {
                 Some((open_sig, open_ts_ms)) => {
-                    self.v071_tape_sample(slot, event, &open_sig, open_ts_ms)
+                    self.v071_tape_sample(slot, descriptor, event, &open_sig, open_ts_ms)
                 }
                 None => None,
             }
@@ -560,11 +561,14 @@ impl TradingRuntime {
     /// firehose pump-create stamp to that same buy (sibling project `1` age
     /// getting — Instant launch map, no birth RPC). `open_signature` must be
     /// the gate buy that opened the cycle so volume/age freeze there.
-    /// Alt-quote atoms use Jupiter FX; missing FX refreshes in the background
-    /// and never blocks the serial inbound handler.
+    /// SOL pairs convert the lookback to SOL. Non-SOL pairs skip the volume
+    /// band (Jupiter FX would otherwise block seek); age still gates.
+    /// Missing FX refreshes in the background and never blocks the serial
+    /// inbound handler.
     fn v071_tape_sample(
         self: &Arc<Self>,
         slot: &StrategySlot,
+        descriptor: &crate::events::PoolDescriptor,
         event: &PoolTradeEvent,
         open_signature: &str,
         _open_timestamp_ms: u64,
@@ -574,13 +578,24 @@ impl TradingRuntime {
         }
         let cfg = &self.config.strategy_v071;
         let age_gate = cfg.min_target_age_s > 0.0 || cfg.max_target_age_s > 0.0;
-        let volume_gate = cfg.target_volume_s > 0.0
+        // Alt-quote volume needs Jupiter FX and often stalls entry; skip that
+        // band for non-SOL while keeping the SOL lookback gate.
+        let volume_gate = sol_pair(descriptor, event)
+            && cfg.target_volume_s > 0.0
             && (cfg.min_target_volume_sol > 0.0 || cfg.max_target_volume_sol > 0.0);
+        // `None` volume skips the band — only safe when the volume gate is off
+        // (non-SOL or config). Unknown samples must be NaN so SOL still blocks.
+        let unknown = || {
+            Some((
+                if volume_gate { Some(f64::NAN) } else { None },
+                if age_gate { Some(f64::NAN) } else { None },
+            ))
+        };
         let Some(tape) = self.tape.as_ref() else {
-            return Some((None, None));
+            return unknown();
         };
         let Ok(mint) = event.mint.parse::<Pubkey>() else {
-            return Some((None, None));
+            return unknown();
         };
         let signature = open_signature
             .parse::<solana_sdk::signature::Signature>()
@@ -613,6 +628,7 @@ impl TradingRuntime {
             mint = %event.mint,
             volume = volume.filter(|sol| sol.is_finite()).unwrap_or(-1.0),
             age_sec = age.filter(|sec| sec.is_finite()).unwrap_or(-1.0),
+            skip_volume = !volume_gate && !sol_pair(descriptor, event),
             "[04 STRAT] v071 tape"
         );
         Some((volume, age))
