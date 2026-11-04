@@ -351,7 +351,12 @@ async fn main() -> anyhow::Result<()> {
             .max(120.0),
     );
     let tape = v071_live.then(|| Arc::new(V071Tape::new(birth_keep)));
-    let tape_keep = Duration::from_secs_f64((v071_cfg.target_volume_s.max(1.0) + 30.0).max(10.0));
+    // Keep the cycle-open buy on the tape through the whole seek clock. A
+    // shorter horizon pruned that sig mid-seek; age then fell back to `now`
+    // and a too-young coin could clear `min_target_age_s`.
+    let tape_keep = Duration::from_secs_f64(
+        (v071_cfg.target_volume_s.max(1.0) + v071_cfg.max_entry_s.max(0.0) + 30.0).max(10.0),
+    );
     let endpoint = config.vibe_grpc_endpoint.clone();
     let token = config.vibe_grpc_token.clone();
     let venues_geyser = Arc::clone(&venues);

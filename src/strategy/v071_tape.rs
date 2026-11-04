@@ -192,9 +192,12 @@ impl V071Tape {
     /// Each leg is `(quote_mint, atoms)`. `None` is native SOL lamports. The
     /// window includes that buy and every sized print in the lookback before
     /// it. A zero-size print still ends the window. Age is non-finite when the
-    /// pump create was never seen on the firehose (or aged out). Volume is
-    /// unpriced when this buy's signature is missing, so later prints are not
-    /// counted in its place.
+    /// pump create was never seen on the firehose (or aged out), or when an
+    /// `open_sig` was given but that buy is not on the tape yet — never fall
+    /// back to `Instant::now()`, or age drifts through the seek window and a
+    /// too-young cycle can pass `min_target_age_s`. Volume is unpriced when
+    /// this buy's signature is missing, so later prints are not counted in
+    /// its place.
     pub fn open_window(
         &self,
         mint: &Pubkey,
@@ -207,12 +210,14 @@ impl V071Tape {
             open_sig.and_then(|sig| queue.iter().find(|sample| sample.sig == *sig))
         });
         let missing_open = open_sig.is_some() && found.is_none();
-        let open_at = found.map(|sample| sample.at).unwrap_or_else(Instant::now);
-        let cutoff = open_at.checked_sub(lookback).unwrap_or(open_at);
+        // Age must freeze at the open buy. A missing open sig used to fall
+        // back to `now`, so retries during seek inflated age past the min.
+        let open_at = found.map(|sample| sample.at);
         let mut seen = HashSet::new();
         let mut legs: Vec<(Option<Pubkey>, u64)> = Vec::new();
         let mut unpriced = missing_open;
-        if !missing_open {
+        if let Some(open_at) = open_at {
+            let cutoff = open_at.checked_sub(lookback).unwrap_or(open_at);
             if let Some(queue) = queue {
                 for sample in queue {
                     if sample.at < cutoff || sample.at > open_at {
@@ -239,9 +244,14 @@ impl V071Tape {
             }
         }
         drop(map);
-        let age = {
-            let launches = self.launches.lock().unwrap_or_else(|err| err.into_inner());
-            launches.age_at(mint, open_at)
+        let age = match open_at {
+            Some(at) => {
+                let launches = self.launches.lock().unwrap_or_else(|err| err.into_inner());
+                launches.age_at(mint, at)
+            }
+            // No open buy on the tape (or none asked for). Unknown — do not
+            // age from wall clock or a too-young coin clears the min in seek.
+            None => f64::NAN,
         };
         (legs, unpriced, age)
     }
@@ -445,6 +455,20 @@ mod tests {
         let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(9)));
         assert!(unpriced);
         assert!(legs.is_empty());
+    }
+
+    #[test]
+    fn missing_open_does_not_let_age_drift_with_wall_clock() {
+        // Regression: gate buy age was 19s (min 30) but Instant::now() fallback
+        // on a missing open sig let seek retries age past the floor and buy.
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([8u8; 32]);
+        let create_at = Instant::now() - Duration::from_secs(19);
+        book.record_launch_at(mint, create_at);
+        let (_, unpriced, age) =
+            book.open_window(&mint, Duration::from_secs(5), Some(&sig(9)));
+        assert!(unpriced);
+        assert!(!age.is_finite(), "age must stay unknown, got {age}");
     }
 
     #[test]

@@ -55,6 +55,9 @@ struct FlowState {
     target_volume: f64,
     /// Seconds since the pump create we saw. Zero when the sample left age unknown.
     target_age_s: f64,
+    /// Once a finite create→open age is seen, keep it for the whole cycle so a
+    /// later missing open sample (tape prune during seek) cannot rewrite age.
+    age_frozen: bool,
     partial_sell: bool,
     tape_ready: bool,
     tape_blocked: bool,
@@ -94,6 +97,7 @@ fn fresh_state() -> FlowState {
         pressure: Vec::new(),
         target_volume: 0.0,
         target_age_s: 0.0,
+        age_frozen: false,
         partial_sell: false,
         tape_ready: false,
         tape_blocked: false,
@@ -412,12 +416,21 @@ impl StrategyV071Engine {
             self.st.tape_blocked = self.volume_gate_on() || self.age_gate_on();
             self.st.target_volume = 0.0;
             self.st.target_age_s = 0.0;
+            self.st.age_frozen = false;
             return;
         };
         self.st.tape_ready = true;
-        let age_sec = age.unwrap_or(0.0);
-        let age_known = age_sec.is_finite() && age_sec >= 0.0;
-        self.st.target_age_s = if age_known { age_sec } else { 0.0 };
+        let sample_age = age.unwrap_or(f64::NAN);
+        let sample_known = sample_age.is_finite() && sample_age >= 0.0;
+        // Freeze the first finite create→open age (scalpingbot `_freeze_target_age`).
+        if sample_known && !self.st.age_frozen {
+            self.st.target_age_s = sample_age;
+            self.st.age_frozen = true;
+        } else if !self.st.age_frozen {
+            self.st.target_age_s = 0.0;
+        }
+        let age_sec = self.st.target_age_s;
+        let age_known = self.st.age_frozen;
         let mut blocked = false;
         match volume {
             // Skip the volume band (non-SOL runtime passes `None`; SOL passes `Some`).
@@ -647,6 +660,9 @@ impl StrategyV071Engine {
             self.st.target_buys = if sol > 0.0 { 1 } else { 0 };
             self.st.second_buy_seen = false;
             self.st.partial_sell = false;
+            // New cycle — do not keep the previous open's frozen age.
+            self.st.age_frozen = false;
+            self.st.target_age_s = 0.0;
             self.take_open_tape();
             clear_streak(&mut self.st);
             return None;
@@ -1348,5 +1364,22 @@ mod tests {
         );
         assert_eq!(engine.last_buy_diag().target_volume, 4.0);
         assert_eq!(engine.last_buy_diag().target_age_s, 40.0);
+    }
+
+    #[test]
+    fn frozen_young_age_stays_blocked_when_later_sample_drifts() {
+        // 4uaS… case: open age 19s should stay blocked even if a later refresh
+        // claims 60s (missing open sig + wall clock during seek).
+        let mut engine = open_with(None, Some(19.0));
+        assert_eq!(
+            engine.on_event(&print("BUY", 1.0, "still-young", T0 + 3_000)),
+            None
+        );
+        engine.set_open_tape(None, Some(60.0));
+        assert_eq!(
+            engine.on_event(&print("BUY", 1.0, "drifted", T0 + 12_000)),
+            None
+        );
+        assert_eq!(engine.phase_name(), "seek_sell");
     }
 }
