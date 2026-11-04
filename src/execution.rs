@@ -118,12 +118,42 @@ impl LiveExecution {
     pub async fn send_buy(self: &Arc<Self>, token: &Mutex<TokenInner>) -> Result<()> {
         let venue = token.lock().await.descriptor.venue.clone();
         if venue == "launchlab" {
-            if self.alt_non_sol_quote(token).await.is_some() {
+            if let Some(quote) = self.alt_non_sol_quote(token).await {
+                let (mint, lamports) = {
+                    let state = token.lock().await;
+                    (
+                        state.descriptor.mint.clone(),
+                        state.buy_lamports.unwrap_or(self.buy_lamports),
+                    )
+                };
+                tracing::info!(
+                    strategy = %self.strategy,
+                    mint = %mint,
+                    quote = %quote,
+                    spend_lamports = lamports,
+                    venue = "launchlab",
+                    "[05 ENTRY] Non-SOL buy start"
+                );
                 return self.send_alt_launchpad_buy(token).await;
             }
             return self.send_sol_launchpad_buy(token).await;
         }
-        if self.alt_non_sol_quote(token).await.is_some() {
+        if let Some(quote) = self.alt_non_sol_quote(token).await {
+            let (mint, lamports) = {
+                let state = token.lock().await;
+                (
+                    state.descriptor.mint.clone(),
+                    state.buy_lamports.unwrap_or(self.buy_lamports),
+                )
+            };
+            tracing::info!(
+                strategy = %self.strategy,
+                mint = %mint,
+                quote = %quote,
+                spend_lamports = lamports,
+                venue = "pump",
+                "[05 ENTRY] Non-SOL buy start"
+            );
             return self.send_alt_pump_buy(token).await;
         }
         let mut last_error = String::from("buy failed");
@@ -272,11 +302,15 @@ impl LiveExecution {
                 }
             };
             tracing::info!(
+                strategy = %self.strategy,
                 mint = %mint,
                 quote = %quote_mint,
                 spend_lamports = lamports,
                 quote_atoms = legs.quote_atoms,
-                "[05 ENTRY] Alt-quote buy: Jupiter SOL→quote + curve"
+                jupiter_out = legs.jupiter.out_amount,
+                jupiter_min_out = legs.jupiter.other_amount_threshold,
+                attempt,
+                "[05 ENTRY] Non-SOL buy: Jupiter SOL→quote + curve"
             );
             let blockhash = self.blockhashes.get().await?;
             let combo = compile_v1_ixs(
@@ -297,15 +331,24 @@ impl LiveExecution {
                 Ok(fill) => Ok(fill),
                 Err(err) if v1_failed || combo_needs_split(&err) => {
                     tracing::info!(
+                        strategy = %self.strategy,
                         mint = %mint,
+                        quote = %quote_mint,
                         error = %err,
-                        "[05 ENTRY] Alt-quote combo too large; sending SOL→quote then curve"
+                        "[05 ENTRY] Non-SOL buy combo too large; sending SOL→quote then curve"
                     );
                     match self.send_alt_buy_legs(token, &legs, attempt).await {
                         Ok(fill) => Ok(fill),
                         Err(err) => {
                             last_error = err.to_string();
-                            tracing::warn!(attempt, mint = %mint, error = %last_error, "[05 ENTRY] Buy attempt failed");
+                            tracing::warn!(
+                                strategy = %self.strategy,
+                                attempt,
+                                mint = %mint,
+                                quote = %quote_mint,
+                                error = %last_error,
+                                "[05 ENTRY] Non-SOL buy attempt failed"
+                            );
                             break;
                         }
                     }
@@ -313,14 +356,29 @@ impl LiveExecution {
                 Err(err) => Err(err),
             };
             match submitted {
-                Ok((_signature, _log_tokens, _log_quote, _raw_price)) => {
+                Ok((signature, _log_tokens, _log_quote, _raw_price)) => {
+                    tracing::info!(
+                        strategy = %self.strategy,
+                        mint = %mint,
+                        quote = %quote_mint,
+                        %signature,
+                        attempt,
+                        "[05 ENTRY] Non-SOL buy landed"
+                    );
                     token.lock().await.alt_refill_signature = None;
                     self.finish_alt_buy(token, &legs, lamports).await?;
                     return Ok(());
                 }
                 Err(err) => {
                     last_error = err.to_string();
-                    tracing::warn!(attempt, mint = %mint, error = %last_error, "[05 ENTRY] Buy attempt failed");
+                    tracing::warn!(
+                        strategy = %self.strategy,
+                        attempt,
+                        mint = %mint,
+                        quote = %quote_mint,
+                        error = %last_error,
+                        "[05 ENTRY] Non-SOL buy attempt failed"
+                    );
                     if is_non_retryable_buy_error(&last_error, &venue) {
                         let mut state = token.lock().await;
                         self.reject_buy(&mut state, "buy_slippage_rejected", &last_error)
@@ -530,11 +588,15 @@ impl LiveExecution {
                 expected_tokens,
             };
             tracing::info!(
+                strategy = %self.strategy,
                 mint = %mint,
                 quote = %quote_mint,
                 spend_lamports = lamports,
                 quote_atoms = legs.quote_atoms,
-                "[05 ENTRY] Alt-quote buy: Jupiter SOL→quote + LaunchLab"
+                jupiter_out = legs.jupiter.out_amount,
+                jupiter_min_out = legs.jupiter.other_amount_threshold,
+                attempt,
+                "[05 ENTRY] Non-SOL buy: Jupiter SOL→quote + LaunchLab"
             );
             let blockhash = self.blockhashes.get().await?;
             let combo = compile_v1_ixs(
@@ -555,15 +617,24 @@ impl LiveExecution {
                 Ok(fill) => Ok(fill),
                 Err(err) if v1_failed || combo_needs_split(&err) => {
                     tracing::info!(
+                        strategy = %self.strategy,
                         mint = %mint,
+                        quote = %quote_mint,
                         error = %err,
-                        "[05 ENTRY] LaunchLab combo too large; sending SOL→quote then curve"
+                        "[05 ENTRY] Non-SOL LaunchLab combo too large; sending SOL→quote then curve"
                     );
                     match self.send_alt_buy_legs(token, &legs, attempt).await {
                         Ok(fill) => Ok(fill),
                         Err(err) => {
                             last_error = err.to_string();
-                            tracing::warn!(attempt, mint = %mint, error = %last_error, "[05 ENTRY] Buy attempt failed");
+                            tracing::warn!(
+                                strategy = %self.strategy,
+                                attempt,
+                                mint = %mint,
+                                quote = %quote_mint,
+                                error = %last_error,
+                                "[05 ENTRY] Non-SOL buy attempt failed"
+                            );
                             break;
                         }
                     }
@@ -571,14 +642,29 @@ impl LiveExecution {
                 Err(err) => Err(err),
             };
             match submitted {
-                Ok((_signature, _log_tokens, _log_quote, _raw_price)) => {
+                Ok((signature, _log_tokens, _log_quote, _raw_price)) => {
+                    tracing::info!(
+                        strategy = %self.strategy,
+                        mint = %mint,
+                        quote = %quote_mint,
+                        %signature,
+                        attempt,
+                        "[05 ENTRY] Non-SOL buy landed"
+                    );
                     token.lock().await.alt_refill_signature = None;
                     self.finish_alt_buy(token, &legs, lamports).await?;
                     return Ok(());
                 }
                 Err(err) => {
                     last_error = err.to_string();
-                    tracing::warn!(attempt, mint = %mint, error = %last_error, "[05 ENTRY] Buy attempt failed");
+                    tracing::warn!(
+                        strategy = %self.strategy,
+                        attempt,
+                        mint = %mint,
+                        quote = %quote_mint,
+                        error = %last_error,
+                        "[05 ENTRY] Non-SOL buy attempt failed"
+                    );
                     if is_non_retryable_buy_error(&last_error, &venue) {
                         let mut state = token.lock().await;
                         self.reject_buy(&mut state, "buy_slippage_rejected", &last_error)
@@ -636,6 +722,15 @@ impl LiveExecution {
             self.venues.tip_lamports,
         )?;
         let jupiter_sig = self.land_tx(jupiter).await.context("SOL→quote leg")?;
+        tracing::info!(
+            strategy = %self.strategy,
+            mint = %legs.mint,
+            quote = %legs.quote_mint,
+            signature = %jupiter_sig,
+            spend_quote_atoms = legs.quote_atoms,
+            attempt,
+            "[05 ENTRY] Non-SOL buy leg: SOL→quote landed"
+        );
         token.lock().await.alt_refill_signature = Some(jupiter_sig.to_string());
         let mut last = anyhow!("curve buy failed");
         for curve_attempt in 1..=3 {
@@ -687,12 +782,26 @@ impl LiveExecution {
                 }
             };
             match self.submit_compiled(token, curve, true, attempt, None).await {
-                Ok(fill) => return Ok(fill),
+                Ok(fill) => {
+                    tracing::info!(
+                        strategy = %self.strategy,
+                        mint = %legs.mint,
+                        quote = %legs.quote_mint,
+                        signature = %fill.0,
+                        curve_attempt,
+                        attempt,
+                        "[05 ENTRY] Non-SOL buy leg: curve landed"
+                    );
+                    return Ok(fill);
+                }
                 Err(err) => {
                     tracing::warn!(
+                        strategy = %self.strategy,
+                        mint = %legs.mint,
+                        quote = %legs.quote_mint,
                         curve_attempt,
                         error = %err,
-                        "[05 ENTRY] Curve leg failed after SOL→quote"
+                        "[05 ENTRY] Non-SOL curve leg failed after SOL→quote"
                     );
                     last = err;
                     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -823,12 +932,18 @@ impl LiveExecution {
                 token_amount,
             )
             .await;
+        let buy_signature = token.lock().await.buy_signature.clone();
         tracing::info!(
+            strategy = %self.strategy,
             mint = %legs.mint,
+            quote = %legs.quote_mint,
             token_amount,
-            curve_sol,
-            cost_sol = budget_lamports,
-            "[05 ENTRY] Alt-quote fill: token account size, curve SOL for take-profit, Jupiter budget for the close"
+            quote_atoms = legs.quote_atoms,
+            curve_sol_lamports = curve_sol,
+            cost_lamports = budget_lamports,
+            entry_price = price,
+            buy_signature = buy_signature.as_deref().unwrap_or(""),
+            "[05 ENTRY] Non-SOL buy fill"
         );
         self.accept_buy_fill(token, token_amount, budget_lamports, price)
             .await
@@ -1196,9 +1311,13 @@ impl LiveExecution {
                 }
             };
             tracing::info!(
+                strategy = %self.strategy,
                 mint = %mint,
-                amount,
-                "[08 EXIT] Alt-quote sell: curve complete, Jupiter mint→SOL"
+                quote = quote_mint.as_deref().unwrap_or(""),
+                token_amount = amount,
+                attempt,
+                reason,
+                "[08 EXIT] Non-SOL sell: migrated Jupiter mint→SOL"
             );
             let build = match self
                 .quotes
@@ -1245,7 +1364,7 @@ impl LiveExecution {
                 .submit_compiled(token, tx, false, attempt, Some(reason))
                 .await
             {
-                Ok((_signature, token_amount, parsed_sol, parsed_price)) => {
+                Ok((signature, token_amount, parsed_sol, parsed_price)) => {
                     let sol_amount = if build.out_amount > 0 {
                         build.out_amount
                     } else {
@@ -1256,6 +1375,17 @@ impl LiveExecution {
                     } else {
                         parsed_price
                     };
+                    tracing::info!(
+                        strategy = %self.strategy,
+                        mint = %mint,
+                        quote = quote_mint.as_deref().unwrap_or(""),
+                        %signature,
+                        token_amount,
+                        sell_sol_lamports = sol_amount,
+                        exit_price = price,
+                        reason,
+                        "[08 EXIT] Non-SOL migrated sell landed"
+                    );
                     if let Some(quote) = quote_mint.and_then(|q| q.parse::<Pubkey>().ok()) {
                         let quote_s = quote.to_string();
                         if crate::venues::ids::is_sol_quote(Some(&quote_s)) {
@@ -1271,7 +1401,13 @@ impl LiveExecution {
                 Err(err) => {
                     last_error = err.to_string();
                     token.lock().await.prepared_sell = None;
-                    tracing::warn!(attempt, mint = %mint, error = %last_error, "[08 EXIT] Sell attempt failed");
+                    tracing::warn!(
+                        strategy = %self.strategy,
+                        attempt,
+                        mint = %mint,
+                        error = %last_error,
+                        "[08 EXIT] Non-SOL sell attempt failed"
+                    );
                 }
             }
         }
@@ -1286,6 +1422,20 @@ impl LiveExecution {
         reason: &str,
     ) -> Result<()> {
         if self.alt_curve_migrated(token).await {
+            let (mint, quote) = {
+                let state = token.lock().await;
+                (
+                    state.descriptor.mint.clone(),
+                    state.descriptor.quote_mint.clone().unwrap_or_default(),
+                )
+            };
+            tracing::info!(
+                strategy = %self.strategy,
+                mint = %mint,
+                quote = %quote,
+                reason,
+                "[08 EXIT] Non-SOL sell start (migrated → Jupiter mint→SOL)"
+            );
             return self.send_alt_migrated_sell(token, reason).await;
         }
         if self.sol_curve_migrated(token).await {
@@ -1295,6 +1445,16 @@ impl LiveExecution {
             && self.alt_non_sol_quote(token).await.is_none()
         {
             return self.send_sol_launchpad_sell(token, reason).await;
+        }
+        if let Some(quote) = self.alt_non_sol_quote(token).await {
+            let mint = token.lock().await.descriptor.mint.clone();
+            tracing::info!(
+                strategy = %self.strategy,
+                mint = %mint,
+                quote = %quote,
+                reason,
+                "[08 EXIT] Non-SOL sell start (curve mint→quote)"
+            );
         }
         let mut last_error = String::from("sell failed");
         let mut stop_retry = false;
@@ -1361,9 +1521,14 @@ impl LiveExecution {
                 }
                 expected_quote = launchpad::quote_sell_quote(&pool, amount).max(1);
                 tracing::info!(
+                    strategy = %self.strategy,
                     mint = %mint,
                     quote = %quote_mint,
-                    "[08 EXIT] Alt-quote sell: LaunchLab mint→quote"
+                    token_amount = amount,
+                    expected_quote_atoms = expected_quote,
+                    attempt,
+                    reason,
+                    "[08 EXIT] Non-SOL sell: LaunchLab mint→quote"
                 );
                 launchpad::sell_instructions(
                     &self.wallet.pubkey(),
@@ -1397,9 +1562,14 @@ impl LiveExecution {
                 expected_quote =
                     (crate::venues::quote::quote_sell_sol(amount as u128, &curve) as u64).max(1);
                 tracing::info!(
+                    strategy = %self.strategy,
                     mint = %mint,
                     quote = %quote_mint,
-                    "[08 EXIT] Alt-quote sell: curve mint→quote"
+                    token_amount = amount,
+                    expected_quote_atoms = expected_quote,
+                    attempt,
+                    reason,
+                    "[08 EXIT] Non-SOL sell: curve mint→quote"
                 );
                 build_pump_sell_alt(
                     &self.wallet.pubkey(),
@@ -1453,7 +1623,7 @@ impl LiveExecution {
                 .submit_and_confirm(token, &prepared, false, attempt, Some(reason))
                 .await
             {
-                Ok((_signature, token_amount, mut sol_amount, mut price)) => {
+                Ok((signature, token_amount, mut sol_amount, mut price)) => {
                     if let Some(quote_mint) = alt_quote {
                         match self
                             .quotes
@@ -1470,14 +1640,29 @@ impl LiveExecution {
                             }
                             Err(err) => {
                                 tracing::warn!(
+                                    strategy = %self.strategy,
                                     error = %err,
+                                    mint = %mint,
                                     quote = %quote_mint,
-                                    "[08 EXIT] Alt-quote sell proceeds are 0; FX missing"
+                                    expected_quote_atoms = expected_quote,
+                                    "[08 EXIT] Non-SOL sell proceeds are 0; FX missing"
                                 );
                                 sol_amount = 0;
                                 price = 0.0;
                             }
                         }
+                        tracing::info!(
+                            strategy = %self.strategy,
+                            mint = %mint,
+                            quote = %quote_mint,
+                            %signature,
+                            token_amount,
+                            expected_quote_atoms = expected_quote,
+                            sell_sol_lamports = sol_amount,
+                            exit_price = price,
+                            reason,
+                            "[08 EXIT] Non-SOL sell landed; reclaiming quote→SOL"
+                        );
                         self.spawn_quote_reclaim(quote_mint);
                     }
                     self.finish_sell(token, reason, token_amount, sol_amount, price)
@@ -1752,7 +1937,14 @@ impl LiveExecution {
 
     fn spawn_quote_reclaim(self: &Arc<Self>, quote_mint: Pubkey) {
         let execution = Arc::clone(self);
+        let strategy = self.strategy.clone();
         tokio::spawn(async move {
+            tracing::info!(
+                strategy = %strategy,
+                quote = %quote_mint,
+                delay_ms = RECLAIM_DELAY.as_millis() as u64,
+                "[08 EXIT] Non-SOL reclaim scheduled"
+            );
             tokio::time::sleep(RECLAIM_DELAY).await;
             execution.reclaim_quote_pass(&quote_mint).await;
         });
@@ -1774,10 +1966,11 @@ impl LiveExecution {
                 Ok(()) => break,
                 Err(err) => {
                     tracing::warn!(
+                        strategy = %self.strategy,
                         attempt,
                         error = %err,
                         quote = %quote_mint,
-                        "[08 EXIT] Quote reclaim attempt failed"
+                        "[08 EXIT] Non-SOL reclaim attempt failed"
                     );
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
@@ -1794,7 +1987,11 @@ impl LiveExecution {
             .reclaim_build(&self.wallet.pubkey(), quote_mint)
             .await?
         else {
-            tracing::info!(quote = %quote_mint, "[08 EXIT] Quote ATA already empty");
+            tracing::info!(
+                strategy = %self.strategy,
+                quote = %quote_mint,
+                "[08 EXIT] Non-SOL reclaim: quote ATA already empty"
+            );
             return Ok(());
         };
         let blockhash = self.blockhashes.get().await?;
@@ -1821,9 +2018,11 @@ impl LiveExecution {
         )?;
         let signature = self.land_tx(tx).await?;
         tracing::info!(
+            strategy = %self.strategy,
             quote = %quote_mint,
             %signature,
-            "[08 EXIT] Reclaimed quote to SOL"
+            out_lamports = build.out_amount,
+            "[08 EXIT] Non-SOL reclaim: quote→SOL landed"
         );
         Ok(())
     }
@@ -2108,14 +2307,33 @@ impl LiveExecution {
         }
         state.reset_buy_send_claim();
         state.prepared_buy = None;
+        let quote = state.descriptor.quote_mint.clone().unwrap_or_default();
+        let alt = !crate::venues::ids::is_sol_quote(state.descriptor.quote_mint.as_deref());
         self.journal.record(json!({
             "event": event,
+            "strategy": self.strategy,
             "descriptor": state.descriptor,
             "lifecycle": state.lifecycle.as_str(),
             "error": error,
             "prices": state.prices,
         }));
-        tracing::warn!(error, mint = %state.descriptor.mint, "[05 ENTRY] Buy failed; still watching this mint");
+        if alt {
+            tracing::warn!(
+                strategy = %self.strategy,
+                error,
+                mint = %state.descriptor.mint,
+                quote = %quote,
+                event,
+                "[05 ENTRY] Non-SOL buy failed; still watching this mint"
+            );
+        } else {
+            tracing::warn!(
+                strategy = %self.strategy,
+                error,
+                mint = %state.descriptor.mint,
+                "[05 ENTRY] Buy failed; still watching this mint"
+            );
+        }
     }
 
     /// Pump already rejected the sell because the wallet does not hold that
