@@ -2,7 +2,7 @@
 //!
 //! Same flow as scalpingbot `strategy_v_071.py`, for
 //! 3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA.
-//! Knobs from `config/strategy_v_071.json` (2026-11-02).
+//! Knobs from `config/strategy_v_071.json` (2026-11-05).
 //! Age and volume match scalpingbot `strategy_v_071.py` bands. Volume is buy
 //! SOL plus sell SOL over the last `target_volume_s` up to and including the
 //! buy that opened the cycle. Age is seconds from the firehose pump create
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(loaded.target_volume_s, 5.0);
         assert_eq!(loaded.min_target_volume_sol, 3.0);
         assert_eq!(loaded.max_target_volume_sol, 13.0);
-        assert_eq!(loaded.min_target_age_s, 30.0);
+        assert_eq!(loaded.min_target_age_s, 20.0);
         assert_eq!(loaded.max_target_age_s, 300.0);
         assert!(loaded.partial_sell_skip);
         assert_eq!(loaded.sell_hit_count, 6);
@@ -1218,17 +1218,17 @@ mod tests {
         let mut fat = open_with(Some(13.1), Some(60.0));
         assert_eq!(fat.on_event(&print("BUY", 1.0, "fat", T0 + 3_000)), None);
 
-        let mut young = open_with(Some(5.0), Some(29.0));
+        let mut young = open_with(Some(5.0), Some(19.0));
         assert_eq!(
             young.on_event(&print("BUY", 1.0, "young", T0 + 3_000)),
             None
         );
-        let mut age_floor = open_with(Some(5.0), Some(30.0));
+        let mut age_floor = open_with(Some(5.0), Some(20.0));
         assert_eq!(
             age_floor.on_event(&print("BUY", 1.0, "age-floor", T0 + 3_000)),
             Some("BUY")
         );
-        assert_eq!(age_floor.last_buy_diag().target_age_s, 30.0);
+        assert_eq!(age_floor.last_buy_diag().target_age_s, 20.0);
 
         let mut age_cap = open_with(Some(5.0), Some(300.0));
         assert_eq!(

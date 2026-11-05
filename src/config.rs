@@ -349,11 +349,11 @@ pub struct StrategyV071Config {
 }
 
 impl StrategyV071Config {
-    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-11-02 update).
+    /// Knobs from scalpingbot `config/strategy_v_071.json` (2026-11-05 update).
     /// The entry clock is 3s through 90s. Market cap is off. Buy pressure is off.
     /// Target-buy volume is the 5s window up to that buy, from 3 SOL through 13 SOL
     /// (SOL pairs only — non-SOL skips the volume band).
-    /// Target-buy age is 30s through 300s from the firehose pump create.
+    /// Target-buy age is 20s through 300s from the firehose pump create.
     /// `partial_sell_skip` is on. Sell is 6 buys summing to at least 14 SOL.
     /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
     /// `buy_pressure_s`, `max_buy_pressure`, `target_volume_s`,
@@ -374,7 +374,7 @@ impl StrategyV071Config {
             target_volume_s: 5.0,
             min_target_volume_sol: 3.0,
             max_target_volume_sol: 13.0,
-            min_target_age_s: 30.0,
+            min_target_age_s: 20.0,
             max_target_age_s: 300.0,
             partial_sell_skip: true,
             sell_hit_count: 6,
