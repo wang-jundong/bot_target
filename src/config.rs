@@ -453,7 +453,8 @@ impl StrategyV072Config {
     /// and non-SOL. Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`,
     /// `max_mc_sol`, `target_volume_s`, `min_target_volume_sol`,
     /// `max_target_volume_sol`, `min_target_age_s`, `max_target_age_s`, and
-    /// `max_hold_s` disable those bounds. `size_sol` matches that config.
+    /// `max_hold_s` disable those bounds. `size_sol` is the live position size
+    /// (0.6; backtest json uses 0.3).
     pub fn default_v072() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
@@ -474,7 +475,7 @@ impl StrategyV072Config {
             second_buy_exit: false,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.3,
+            size_sol: 0.6,
         };
         if cfg.target_volume_s < 0.0 {
             cfg.target_volume_s = 0.0;
