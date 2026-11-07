@@ -115,6 +115,8 @@ pub struct StrategyV071Engine {
     st: FlowState,
     target_wallet: String,
     bound: bool,
+    /// True for SOL/wSOL quote pairs. False for alt-quote (non-SOL) pairs.
+    sol_quote: bool,
     buy_reason: String,
     sell_reason: String,
     buy_diag: BuyDiag,
@@ -135,6 +137,7 @@ impl StrategyV071Engine {
             st: fresh_state(),
             target_wallet: String::new(),
             bound: false,
+            sol_quote: true,
             buy_reason: String::new(),
             sell_reason: String::new(),
             buy_diag: BuyDiag::default(),
@@ -145,6 +148,19 @@ impl StrategyV071Engine {
         };
         engine.st.phase = PHASE_IDLE;
         engine
+    }
+
+    /// Mark whether this engine's pool is a SOL quote. Set once when tracking starts.
+    pub fn set_sol_quote(&mut self, sol_quote: bool) {
+        self.sol_quote = sol_quote;
+    }
+
+    fn effective_take_profit(&self) -> f64 {
+        if self.sol_quote {
+            self.cfg.take_profit
+        } else {
+            self.cfg.take_profit_non_sol
+        }
     }
 
     pub fn phase_name(&self) -> &'static str {
@@ -752,10 +768,11 @@ impl StrategyV071Engine {
         if self.st.phase != PHASE_HOLD {
             return None;
         }
-        if self.cfg.take_profit > 0.0
+        let take_profit = self.effective_take_profit();
+        if take_profit > 0.0
             && self.st.entry_px > 0.0
             && px > 0.0
-            && px / self.st.entry_px - 1.0 >= self.cfg.take_profit
+            && px / self.st.entry_px - 1.0 >= take_profit
         {
             self.st.phase = PHASE_WAIT;
             self.st.why = "take_profit".to_string();
@@ -853,6 +870,7 @@ mod tests {
         assert_eq!(loaded.sell_hit_count, 6);
         assert_eq!(loaded.sell_hit_min, 14.0);
         assert_eq!(loaded.take_profit, 1.2);
+        assert_eq!(loaded.take_profit_non_sol, 1.0);
         assert_eq!(loaded.max_hold_s, 0.0);
         assert!(!loaded.first_cycle_only);
         assert!(loaded.target_sell_exit);
@@ -969,6 +987,18 @@ mod tests {
         took.price = fill * 2.2;
         assert_eq!(tp.on_event(&took), Some("SELL"));
         assert_eq!(tp.last_sell_reason(), "take_profit");
+
+        let mut alt_tp = bound(|_| {}, "");
+        alt_tp.set_sol_quote(false);
+        arm(&mut alt_tp);
+        alt_tp.on_buy_fill(fill, T0 + 2_000);
+        let mut alt_under = print("SELL", 0.05, "alt-under", T0 + 3_000);
+        alt_under.price = fill * 1.99;
+        assert_eq!(alt_tp.on_event(&alt_under), None);
+        let mut alt_took = print("SELL", 0.05, "alt-tp", T0 + 3_000);
+        alt_took.price = fill * 2.0;
+        assert_eq!(alt_tp.on_event(&alt_took), Some("SELL"));
+        assert_eq!(alt_tp.last_sell_reason(), "take_profit");
 
         let mut held = bound(|cfg| cfg.take_profit = 0.0, "");
         arm(&mut held);

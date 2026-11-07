@@ -362,6 +362,13 @@ impl Engine {
         }
     }
 
+    /// SOL vs alt-quote for v071 take-profit selection.
+    pub fn set_v071_sol_quote(&mut self, sol_quote: bool) {
+        if let Self::V071(e) = self {
+            e.set_sol_quote(sol_quote);
+        }
+    }
+
     /// Seeking with a blocked tape — runtime should re-sample when FX arrives.
     pub fn v071_needs_tape_refresh(&self) -> bool {
         match self {

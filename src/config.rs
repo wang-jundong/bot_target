@@ -340,6 +340,8 @@ pub struct StrategyV071Config {
     pub sell_hit_count: u32,
     pub sell_hit_min: f64,
     pub take_profit: f64,
+    /// Take-profit for non-SOL (alt-quote) pairs. SOL uses `take_profit`.
+    pub take_profit_non_sol: f64,
     pub max_hold_s: f64,
     pub target_sell_exit: bool,
     pub second_buy_exit: bool,
@@ -355,6 +357,7 @@ impl StrategyV071Config {
     /// (SOL pairs only — non-SOL skips the volume band).
     /// Target-buy age is 20s through 300s from the firehose pump create.
     /// `partial_sell_skip` is on. Sell is 6 buys summing to at least 14 SOL.
+    /// Take-profit is 120% on SOL pairs and 100% on non-SOL pairs.
     /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`,
     /// `buy_pressure_s`, `max_buy_pressure`, `target_volume_s`,
     /// `min_target_volume_sol`, `max_target_volume_sol`, `min_target_age_s`,
@@ -380,6 +383,7 @@ impl StrategyV071Config {
             sell_hit_count: 6,
             sell_hit_min: 14.0,
             take_profit: 1.2,
+            take_profit_non_sol: 1.0,
             max_hold_s: 0.0,
             target_sell_exit: true,
             second_buy_exit: false,

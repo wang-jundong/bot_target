@@ -1,10 +1,11 @@
 //! Trade-print tape for v071 volume and age.
 //!
 //! Volume is buy SOL plus sell SOL over `target_volume_s` up to and including
-//! the buy that opened the cycle. A 0 SOL print is left out. An alt-quote print
-//! keeps its quote atoms; the runtime turns those atoms into SOL with the
-//! Jupiter rate before the band is applied. A zero-size print is kept so that
-//! buy can still end the window.
+//! the buy that opened the cycle — same freeze as scalpingbot: chain order
+//! (slot, tx index), so later same-slot peers are not counted. A 0 SOL print
+//! is left out. An alt-quote print keeps its quote atoms; the runtime turns
+//! those atoms into SOL with the Jupiter rate before the band is applied. A
+//! zero-size print is kept so that buy can still end the window.
 //!
 //! Age matches sibling project `1`: seconds from the pump `create` /
 //! `create_v2` we saw on the firehose to the cycle-open buy. Launch times are
@@ -39,6 +40,24 @@ struct Sample {
     /// A non-SOL print whose quote mint could not be read.
     unpriced: bool,
     sig: Signature,
+    /// Chain cursor — freeze volume like scalpingbot (prints at/before open only).
+    slot: u64,
+    transaction_index: Option<u64>,
+}
+
+/// Backtest-compatible order: earlier slot first, then tx index. Missing index
+/// sorts after a known one in the same slot. Equal keys keep queue order.
+fn chain_cmp(a: &Sample, b: &Sample) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match a.slot.cmp(&b.slot) {
+        Ordering::Equal => match (a.transaction_index, b.transaction_index) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        },
+        ord => ord,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -123,15 +142,34 @@ impl V071Tape {
     }
 
     pub fn push(&self, mint: Pubkey, sol: f64, sig: Signature, keep: Duration) {
-        self.push_at(mint, sol, sig, Instant::now(), keep);
+        self.push_at(mint, sol, sig, Instant::now(), 0, None, keep);
     }
 
-    pub fn push_at(&self, mint: Pubkey, sol: f64, sig: Signature, at: Instant, keep: Duration) {
+    pub fn push_at(
+        &self,
+        mint: Pubkey,
+        sol: f64,
+        sig: Signature,
+        at: Instant,
+        slot: u64,
+        transaction_index: Option<u64>,
+        keep: Duration,
+    ) {
         if sol <= 0.0 || !sol.is_finite() {
             return;
         }
         let atoms = (sol * 1_000_000_000.0).round() as u64;
-        self.push_sample(mint, atoms, None, false, sig, at, keep);
+        self.push_sample(
+            mint,
+            atoms,
+            None,
+            false,
+            sig,
+            at,
+            slot,
+            transaction_index,
+            keep,
+        );
     }
 
     fn push_sample(
@@ -142,6 +180,8 @@ impl V071Tape {
         unpriced: bool,
         sig: Signature,
         at: Instant,
+        slot: u64,
+        transaction_index: Option<u64>,
         keep: Duration,
     ) {
         let mut map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
@@ -159,6 +199,8 @@ impl V071Tape {
                 quote,
                 unpriced,
                 sig,
+                slot,
+                transaction_index,
             });
             while queue.len() > MAX_SAMPLES_PER_MINT {
                 queue.pop_front();
@@ -190,14 +232,15 @@ impl V071Tape {
     /// and age in seconds at the cycle-opening buy.
     ///
     /// Each leg is `(quote_mint, atoms)`. `None` is native SOL lamports. The
-    /// window includes that buy and every sized print in the lookback before
-    /// it. A zero-size print still ends the window. Age is non-finite when the
-    /// pump create was never seen on the firehose (or aged out), or when an
-    /// `open_sig` was given but that buy is not on the tape yet — never fall
-    /// back to `Instant::now()`, or age drifts through the seek window and a
-    /// too-young cycle can pass `min_target_age_s`. Volume is unpriced when
-    /// this buy's signature is missing, so later prints are not counted in
-    /// its place.
+    /// window matches scalpingbot: buy+sell SOL over `lookback` **up through
+    /// the open buy in chain order** (slot, tx index). Later same-slot prints
+    /// are excluded even when wall Instant is equal/near. A zero-size print
+    /// still ends the window. Age is non-finite when the pump create was never
+    /// seen on the firehose (or aged out), or when an `open_sig` was given but
+    /// that buy is not on the tape yet — never fall back to `Instant::now()`,
+    /// or age drifts through the seek window and a too-young cycle can pass
+    /// `min_target_age_s`. Volume is unpriced when this buy's signature is
+    /// missing, so later prints are not counted in its place.
     pub fn open_window(
         &self,
         mint: &Pubkey,
@@ -206,40 +249,49 @@ impl V071Tape {
     ) -> (Vec<(Option<Pubkey>, u64)>, bool, f64) {
         let map = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         let queue = map.get(mint);
-        let found = queue.and_then(|queue| {
-            open_sig.and_then(|sig| queue.iter().find(|sample| sample.sig == *sig))
+        let open_idx = queue.and_then(|queue| {
+            open_sig.and_then(|sig| queue.iter().position(|sample| sample.sig == *sig))
         });
-        let missing_open = open_sig.is_some() && found.is_none();
+        let missing_open = open_sig.is_some() && open_idx.is_none();
+        let open = open_idx.and_then(|idx| queue.and_then(|q| q.get(idx)));
         // Age must freeze at the open buy. A missing open sig used to fall
         // back to `now`, so retries during seek inflated age past the min.
-        let open_at = found.map(|sample| sample.at);
+        let open_at = open.map(|sample| sample.at);
         let mut seen = HashSet::new();
         let mut legs: Vec<(Option<Pubkey>, u64)> = Vec::new();
         let mut unpriced = missing_open;
-        if let Some(open_at) = open_at {
+        if let (Some(open_at), Some(open), Some(open_idx), Some(queue)) =
+            (open_at, open, open_idx, queue)
+        {
             let cutoff = open_at.checked_sub(lookback).unwrap_or(open_at);
-            if let Some(queue) = queue {
-                for sample in queue {
-                    if sample.at < cutoff || sample.at > open_at {
-                        continue;
-                    }
-                    if !seen.insert(sample.sig) {
-                        continue;
-                    }
-                    if sample.unpriced {
-                        unpriced = true;
-                        continue;
-                    }
-                    if sample.atoms == 0 {
-                        continue;
-                    }
-                    if let Some((_, atoms)) =
-                        legs.iter_mut().find(|(quote, _)| *quote == sample.quote)
-                    {
-                        *atoms = atoms.saturating_add(sample.atoms);
-                    } else {
-                        legs.push((sample.quote, sample.atoms));
-                    }
+            for (idx, sample) in queue.iter().enumerate() {
+                if sample.at < cutoff {
+                    continue;
+                }
+                // Scalpingbot freezes when the open print is processed: only
+                // prior prints + that buy. Chain order (not wall Instant) is
+                // the upper bound so same-slot peers after the open drop out.
+                match chain_cmp(sample, open) {
+                    std::cmp::Ordering::Greater => continue,
+                    std::cmp::Ordering::Equal if idx > open_idx => continue,
+                    _ => {}
+                }
+                if !seen.insert(sample.sig) {
+                    continue;
+                }
+                if sample.unpriced {
+                    unpriced = true;
+                    continue;
+                }
+                if sample.atoms == 0 {
+                    continue;
+                }
+                if let Some((_, atoms)) =
+                    legs.iter_mut().find(|(quote, _)| *quote == sample.quote)
+                {
+                    *atoms = atoms.saturating_add(sample.atoms);
+                } else {
+                    legs.push((sample.quote, sample.atoms));
                 }
             }
         }
@@ -352,7 +404,17 @@ pub fn observe(tx: &ParsedTargetTransaction, tape: &V071Tape, keep: Duration) {
     }
     let at = Instant::now();
     for (mint, (atoms, quote, bad)) in by_mint {
-        tape.push_sample(mint, atoms, quote, bad, signature, at, keep);
+        tape.push_sample(
+            mint,
+            atoms,
+            quote,
+            bad,
+            signature,
+            at,
+            tx.slot,
+            tx.transaction_index,
+            keep,
+        );
     }
 }
 
@@ -364,6 +426,17 @@ mod tests {
         Signature::from([n; 64])
     }
 
+    fn push_sol(
+        book: &V071Tape,
+        mint: Pubkey,
+        sol: f64,
+        n: u8,
+        at: Instant,
+        keep: Duration,
+    ) {
+        book.push_at(mint, sol, sig(n), at, 1, Some(u64::from(n)), keep);
+    }
+
     #[test]
     fn volume_includes_his_open_and_the_lookback_only() {
         let book = V071Tape::new(Duration::from_secs(600));
@@ -371,15 +444,38 @@ mod tests {
         let keep = Duration::from_secs(60);
         let open_at = Instant::now();
         book.record_launch_at(mint, open_at - Duration::from_secs(30));
-        book.push_at(mint, 9.0, sig(1), open_at - Duration::from_secs(8), keep);
-        book.push_at(mint, 2.0, sig(2), open_at - Duration::from_secs(3), keep);
-        book.push_at(mint, 1.0, sig(3), open_at, keep);
-        book.push_at(mint, 4.0, sig(4), open_at + Duration::from_secs(1), keep);
+        push_sol(&book, mint, 9.0, 1, open_at - Duration::from_secs(8), keep);
+        push_sol(&book, mint, 2.0, 2, open_at - Duration::from_secs(3), keep);
+        push_sol(&book, mint, 1.0, 3, open_at, keep);
+        push_sol(&book, mint, 4.0, 4, open_at + Duration::from_secs(1), keep);
         let (legs, unpriced, age) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(3)));
         assert!(!unpriced);
         let volume: f64 = legs.iter().map(|(_, atoms)| *atoms as f64 / 1e9).sum();
         assert!((volume - 3.0).abs() < 1e-9, "vol={volume}");
         assert!((age - 30.0).abs() < 0.05, "age={age}");
+    }
+
+    #[test]
+    fn same_slot_peers_after_open_are_not_in_volume() {
+        // GoF3-style: quiet lookback, his open first, then same-slot buys.
+        // Backtest freezes at his open → only his SOL counts.
+        let book = V071Tape::new(Duration::from_secs(600));
+        let mint = Pubkey::new_from_array([11u8; 32]);
+        let keep = Duration::from_secs(60);
+        let open_at = Instant::now();
+        book.record_launch_at(mint, open_at - Duration::from_secs(80));
+        push_sol(&book, mint, 0.978, 1, open_at, keep);
+        // Same Instant as open (batch), higher tx index — must not count.
+        book.push_at(mint, 0.889, sig(2), open_at, 1, Some(2), keep);
+        book.push_at(mint, 0.247, sig(3), open_at, 1, Some(3), keep);
+        book.push_at(mint, 2.122, sig(4), open_at, 1, Some(4), keep);
+        let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(1)));
+        assert!(!unpriced);
+        let volume: f64 = legs.iter().map(|(_, atoms)| *atoms as f64 / 1e9).sum();
+        assert!(
+            (volume - 0.978).abs() < 1e-6,
+            "same-slot peers must not inflate volume, got {volume}"
+        );
     }
 
     #[test]
@@ -406,9 +502,21 @@ mod tests {
             false,
             sig(1),
             open_at - Duration::from_secs(1),
+            1,
+            Some(1),
             keep,
         );
-        book.push_sample(mint, 150_000_000, Some(quote), false, sig(2), open_at, keep);
+        book.push_sample(
+            mint,
+            150_000_000,
+            Some(quote),
+            false,
+            sig(2),
+            open_at,
+            1,
+            Some(2),
+            keep,
+        );
         let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(2)));
         assert!(!unpriced);
         assert_eq!(legs, vec![(Some(quote), 200_000_000)]);
@@ -427,9 +535,11 @@ mod tests {
             false,
             sig(2),
             open_at - Duration::from_secs(1),
+            1,
+            Some(2),
             keep,
         );
-        book.push_sample(mint, 0, None, false, sig(3), open_at, keep);
+        book.push_sample(mint, 0, None, false, sig(3), open_at, 1, Some(3), keep);
         book.push_sample(
             mint,
             4_000_000_000,
@@ -437,6 +547,8 @@ mod tests {
             false,
             sig(4),
             open_at + Duration::from_secs(1),
+            1,
+            Some(4),
             keep,
         );
         let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(3)));
@@ -451,7 +563,14 @@ mod tests {
         let mint = Pubkey::new_from_array([5u8; 32]);
         let keep = Duration::from_secs(60);
         let open_at = Instant::now();
-        book.push_at(mint, 4.0, sig(4), open_at + Duration::from_secs(1), keep);
+        push_sol(
+            &book,
+            mint,
+            4.0,
+            4,
+            open_at + Duration::from_secs(1),
+            keep,
+        );
         let (legs, unpriced, _) = book.open_window(&mint, Duration::from_secs(5), Some(&sig(9)));
         assert!(unpriced);
         assert!(legs.is_empty());
@@ -482,13 +601,15 @@ mod tests {
                 1.0,
                 sig_at(n as u32),
                 now - Duration::from_secs(30),
+                1,
+                Some(n as u64),
                 keep,
             );
         }
         let hot = mint_at(u32::MAX - 1);
         let fresh = mint_at(u32::MAX - 2);
-        book.push_at(hot, 1.0, sig(1), now, keep);
-        book.push_at(fresh, 2.0, sig(2), now, keep);
+        push_sol(&book, hot, 1.0, 1, now, keep);
+        push_sol(&book, fresh, 2.0, 2, now, keep);
         let (hot_legs, hot_unpriced, _) =
             book.open_window(&hot, Duration::from_secs(60), Some(&sig(1)));
         let (fresh_legs, fresh_unpriced, _) =

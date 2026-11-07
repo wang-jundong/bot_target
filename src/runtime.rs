@@ -364,7 +364,8 @@ impl TradingRuntime {
                     "[03 DETECT] Alt-quote pair"
                 );
             }
-            let engine = self.make_engine(slot);
+            let mut engine = self.make_engine(slot);
+            engine.set_v071_sol_quote(sol_pair(descriptor, event));
             // Gate buy itself is the cycle open — freeze age/volume to this print.
             let tape_sample = self.v071_tape_sample(
                 slot,
@@ -1323,6 +1324,7 @@ impl TradingRuntime {
                 swap: None,
             };
             let mut engine = self.make_engine(slot);
+            engine.set_v071_sol_quote(crate::venues::ids::is_sol_quote(quote_mint));
             let strat_px = to_strategy_price(entry_price);
             engine.bind_gate(
                 &slot.target_wallet,
