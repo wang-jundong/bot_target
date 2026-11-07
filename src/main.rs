@@ -149,6 +149,29 @@ async fn main() -> anyhow::Result<()> {
                     "[01 STARTUP] Strategy knobs"
                 );
             }
+            bot_target::config::StrategyName::V072 => {
+                let c = &config.strategy_v072;
+                tracing::info!(
+                    strategy = plan.name.as_str(),
+                    target_wallet = %plan.target_wallet,
+                    size_sol = c.size_sol,
+                    min_entry_s = c.min_entry_s,
+                    max_entry_s = c.max_entry_s,
+                    min_mc_sol = c.min_mc_sol,
+                    max_mc_sol = c.max_mc_sol,
+                    target_volume_s = c.target_volume_s,
+                    min_target_volume_sol = c.min_target_volume_sol,
+                    max_target_volume_sol = c.max_target_volume_sol,
+                    min_target_age_s = c.min_target_age_s,
+                    max_target_age_s = c.max_target_age_s,
+                    partial_sell_skip = c.partial_sell_skip,
+                    take_profit = c.take_profit,
+                    max_hold_s = c.max_hold_s,
+                    second_buy_exit = c.second_buy_exit,
+                    repeat_entries = c.repeat_entries,
+                    "[01 STARTUP] Strategy knobs"
+                );
+            }
             bot_target::config::StrategyName::V081 => {
                 let c = &config.strategy_v081;
                 tracing::info!(
@@ -336,26 +359,40 @@ async fn main() -> anyhow::Result<()> {
     let geyser = GeyserHandle {
         commands: commands_tx,
     };
-    let v071_live = config
-        .strategy_plans
-        .iter()
-        .any(|plan| plan.name == StrategyName::V071);
+    let tape_live = config.strategy_plans.iter().any(|plan| {
+        matches!(plan.name, StrategyName::V071 | StrategyName::V072)
+    });
     let v071_cfg = &config.strategy_v071;
+    let v072_cfg = &config.strategy_v072;
     let birth_keep = Duration::from_secs_f64(
         (v071_cfg
             .max_target_age_s
             .max(v071_cfg.min_target_age_s)
+            .max(v072_cfg.max_target_age_s)
+            .max(v072_cfg.min_target_age_s)
             .max(0.0)
-            + v071_cfg.max_entry_s.max(0.0)
+            + v071_cfg
+                .max_entry_s
+                .max(v072_cfg.max_entry_s)
+                .max(0.0)
             + 60.0)
             .max(120.0),
     );
-    let tape = v071_live.then(|| Arc::new(V071Tape::new(birth_keep)));
+    let tape = tape_live.then(|| Arc::new(V071Tape::new(birth_keep)));
     // Keep the cycle-open buy on the tape through the whole seek clock. A
     // shorter horizon pruned that sig mid-seek; age then fell back to `now`
     // and a too-young coin could clear `min_target_age_s`.
     let tape_keep = Duration::from_secs_f64(
-        (v071_cfg.target_volume_s.max(1.0) + v071_cfg.max_entry_s.max(0.0) + 30.0).max(10.0),
+        (v071_cfg
+            .target_volume_s
+            .max(v072_cfg.target_volume_s)
+            .max(1.0)
+            + v071_cfg
+                .max_entry_s
+                .max(v072_cfg.max_entry_s)
+                .max(0.0)
+            + 30.0)
+            .max(10.0),
     );
     let endpoint = config.vibe_grpc_endpoint.clone();
     let token = config.vibe_grpc_token.clone();

@@ -14,6 +14,7 @@ pub enum StrategyName {
     V051,
     V061,
     V071,
+    V072,
     V081,
     V101,
     V121,
@@ -29,6 +30,7 @@ impl StrategyName {
             Self::V051 => "strategy_v_051",
             Self::V061 => "strategy_v_061",
             Self::V071 => "strategy_v_071",
+            Self::V072 => "strategy_v_072",
             Self::V081 => "strategy_v_081",
             Self::V101 => "strategy_v_101",
             Self::V121 => "strategy_v_121",
@@ -44,6 +46,7 @@ impl StrategyName {
             "strategy_v_051" => Some(Self::V051),
             "strategy_v_061" => Some(Self::V061),
             "strategy_v_071" => Some(Self::V071),
+            "strategy_v_072" => Some(Self::V072),
             "strategy_v_081" => Some(Self::V081),
             "strategy_v_101" => Some(Self::V101),
             "strategy_v_121" => Some(Self::V121),
@@ -417,6 +420,82 @@ impl StrategyV071Config {
 }
 
 #[derive(Debug, Clone)]
+pub struct StrategyV072Config {
+    pub gate_wallet: String,
+    pub min_entry_s: f64,
+    pub max_entry_s: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
+    pub target_volume_s: f64,
+    pub min_target_volume_sol: f64,
+    pub max_target_volume_sol: f64,
+    pub min_target_age_s: f64,
+    pub max_target_age_s: f64,
+    pub partial_sell_skip: bool,
+    pub take_profit: f64,
+    /// Take-profit for non-SOL (alt-quote) pairs. SOL uses `take_profit`.
+    pub take_profit_non_sol: f64,
+    pub max_hold_s: f64,
+    pub target_sell_exit: bool,
+    pub second_buy_exit: bool,
+    pub first_cycle_only: bool,
+    pub repeat_entries: bool,
+    pub size_sol: f64,
+}
+
+impl StrategyV072Config {
+    /// Knobs from scalpingbot `config/strategy_v_072.json` (2026-11-07).
+    /// Same book as v071 without sell-hit / buy-pressure. Clock is 5s through
+    /// 90s. Market cap is off. Target-buy volume is the 5s window up to that
+    /// buy, from 3 SOL through 13 SOL (SOL pairs only — non-SOL skips the
+    /// volume band). Target-buy age is 10s through 300s from the firehose
+    /// pump create. `partial_sell_skip` is off. Take-profit is 100% on SOL
+    /// and non-SOL. Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`,
+    /// `max_mc_sol`, `target_volume_s`, `min_target_volume_sol`,
+    /// `max_target_volume_sol`, `min_target_age_s`, `max_target_age_s`, and
+    /// `max_hold_s` disable those bounds. `size_sol` matches that config.
+    pub fn default_v072() -> Self {
+        let mut cfg = Self {
+            gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
+            min_entry_s: 5.0,
+            max_entry_s: 90.0,
+            min_mc_sol: 0.0,
+            max_mc_sol: 0.0,
+            target_volume_s: 5.0,
+            min_target_volume_sol: 3.0,
+            max_target_volume_sol: 13.0,
+            min_target_age_s: 10.0,
+            max_target_age_s: 300.0,
+            partial_sell_skip: false,
+            take_profit: 1.0,
+            take_profit_non_sol: 1.0,
+            max_hold_s: 0.0,
+            target_sell_exit: true,
+            second_buy_exit: false,
+            first_cycle_only: false,
+            repeat_entries: false,
+            size_sol: 0.3,
+        };
+        if cfg.target_volume_s < 0.0 {
+            cfg.target_volume_s = 0.0;
+        }
+        if cfg.min_target_volume_sol < 0.0 {
+            cfg.min_target_volume_sol = 0.0;
+        }
+        if cfg.max_target_volume_sol < 0.0 {
+            cfg.max_target_volume_sol = 0.0;
+        }
+        if cfg.min_target_age_s < 0.0 {
+            cfg.min_target_age_s = 0.0;
+        }
+        if cfg.max_target_age_s < 0.0 {
+            cfg.max_target_age_s = 0.0;
+        }
+        cfg
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StrategyV081Config {
     pub gate_wallet: String,
     pub dust_sol: f64,
@@ -751,6 +830,7 @@ pub struct AppConfig {
     pub strategy_v051: StrategyV051Config,
     pub strategy_v061: StrategyV061Config,
     pub strategy_v071: StrategyV071Config,
+    pub strategy_v072: StrategyV072Config,
     pub strategy_v081: StrategyV081Config,
     pub strategy_v101: StrategyV101Config,
     pub strategy_v121: StrategyV121Config,
@@ -835,6 +915,7 @@ pub fn load_config() -> Result<AppConfig> {
     let strategy_v051 = StrategyV051Config::default_v051();
     let strategy_v061 = StrategyV061Config::default_v061();
     let strategy_v071 = StrategyV071Config::default_v071();
+    let strategy_v072 = StrategyV072Config::default_v072();
     let strategy_v081 = StrategyV081Config::default_v081();
     let strategy_v101 = StrategyV101Config::default_v101();
     let strategy_v121 = StrategyV121Config::default_v121();
@@ -849,6 +930,7 @@ pub fn load_config() -> Result<AppConfig> {
             &strategy_v051,
             &strategy_v061,
             &strategy_v071,
+            &strategy_v072,
             &strategy_v081,
             &strategy_v101,
             &strategy_v121,
@@ -870,6 +952,7 @@ pub fn load_config() -> Result<AppConfig> {
         strategy_v051,
         strategy_v061,
         strategy_v071,
+        strategy_v072,
         strategy_v081,
         strategy_v101,
         strategy_v121,
@@ -913,6 +996,7 @@ fn quote_pairs_setting(name: StrategyName) -> &'static str {
         StrategyName::V051 => settings::STRATEGY_V_051_QUOTE_PAIRS,
         StrategyName::V061 => settings::STRATEGY_V_061_QUOTE_PAIRS,
         StrategyName::V071 => settings::STRATEGY_V_071_QUOTE_PAIRS,
+        StrategyName::V072 => settings::STRATEGY_V_072_QUOTE_PAIRS,
         StrategyName::V081 => settings::STRATEGY_V_081_QUOTE_PAIRS,
         StrategyName::V101 => settings::STRATEGY_V_101_QUOTE_PAIRS,
         StrategyName::V121 => settings::STRATEGY_V_121_QUOTE_PAIRS,
@@ -942,6 +1026,7 @@ fn build_plan(
     v051: &StrategyV051Config,
     v061: &StrategyV061Config,
     v071: &StrategyV071Config,
+    v072: &StrategyV072Config,
     v081: &StrategyV081Config,
     v101: &StrategyV101Config,
     v121: &StrategyV121Config,
@@ -990,6 +1075,13 @@ fn build_plan(
             0.0,
             v071.target_sell_exit,
             v071.first_cycle_only,
+        ),
+        StrategyName::V072 => (
+            v072.gate_wallet.clone(),
+            v072.size_sol,
+            0.0,
+            v072.target_sell_exit,
+            v072.first_cycle_only,
         ),
         StrategyName::V081 => (
             v081.gate_wallet.clone(),
@@ -1067,6 +1159,10 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
         StrategyName::V071 => (
             settings::STRATEGY_V_071_PRIVATE_KEY_ENCRYPTED,
             settings::STRATEGY_V_071_PRIVATE_KEY_BASE58,
+        ),
+        StrategyName::V072 => (
+            settings::STRATEGY_V_072_PRIVATE_KEY_ENCRYPTED,
+            settings::STRATEGY_V_072_PRIVATE_KEY_BASE58,
         ),
         StrategyName::V081 => (
             settings::STRATEGY_V_081_PRIVATE_KEY_ENCRYPTED,

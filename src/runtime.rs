@@ -411,7 +411,7 @@ impl TradingRuntime {
         };
 
         let own_wallet = slot.execution.wallet.pubkey().to_string();
-        let tape_sample = if slot.name == StrategyName::V071 {
+        let tape_sample = if matches!(slot.name, StrategyName::V071 | StrategyName::V072) {
             let prefetch = {
                 let state = token.lock().await;
                 let gate = event.signature == state.target_buy.signature
@@ -551,6 +551,7 @@ impl TradingRuntime {
             StrategyName::V051 => Engine::new_v051(self.config.strategy_v051.clone(), own),
             StrategyName::V061 => Engine::new_v061(self.config.strategy_v061.clone(), own),
             StrategyName::V071 => Engine::new_v071(self.config.strategy_v071.clone(), own),
+            StrategyName::V072 => Engine::new_v072(self.config.strategy_v072.clone(), own),
             StrategyName::V081 => Engine::new_v081(self.config.strategy_v081.clone(), own),
             StrategyName::V101 => Engine::new_v101(self.config.strategy_v101.clone(), own),
             StrategyName::V121 => Engine::new_v121(self.config.strategy_v121.clone(), own),
@@ -574,16 +575,38 @@ impl TradingRuntime {
         open_signature: &str,
         _open_timestamp_ms: u64,
     ) -> Option<(Option<f64>, Option<f64>)> {
-        if slot.name != StrategyName::V071 {
+        if !matches!(slot.name, StrategyName::V071 | StrategyName::V072) {
             return None;
         }
-        let cfg = &self.config.strategy_v071;
-        let age_gate = cfg.min_target_age_s > 0.0 || cfg.max_target_age_s > 0.0;
+        let (target_volume_s, min_vol, max_vol, min_age, max_age) = match slot.name {
+            StrategyName::V071 => {
+                let c = &self.config.strategy_v071;
+                (
+                    c.target_volume_s,
+                    c.min_target_volume_sol,
+                    c.max_target_volume_sol,
+                    c.min_target_age_s,
+                    c.max_target_age_s,
+                )
+            }
+            StrategyName::V072 => {
+                let c = &self.config.strategy_v072;
+                (
+                    c.target_volume_s,
+                    c.min_target_volume_sol,
+                    c.max_target_volume_sol,
+                    c.min_target_age_s,
+                    c.max_target_age_s,
+                )
+            }
+            _ => return None,
+        };
+        let age_gate = min_age > 0.0 || max_age > 0.0;
         // Alt-quote volume needs Jupiter FX and often stalls entry; skip that
         // band for non-SOL while keeping the SOL lookback gate.
         let volume_gate = sol_pair(descriptor, event)
-            && cfg.target_volume_s > 0.0
-            && (cfg.min_target_volume_sol > 0.0 || cfg.max_target_volume_sol > 0.0);
+            && target_volume_s > 0.0
+            && (min_vol > 0.0 || max_vol > 0.0);
         // `None` volume skips the band — only safe when the volume gate is off
         // (non-SOL or config). Unknown samples must be NaN so SOL still blocks.
         let unknown = || {
@@ -601,7 +624,7 @@ impl TradingRuntime {
         let signature = open_signature
             .parse::<solana_sdk::signature::Signature>()
             .ok();
-        let lookback = std::time::Duration::from_secs_f64(cfg.target_volume_s.max(0.0));
+        let lookback = std::time::Duration::from_secs_f64(target_volume_s.max(0.0));
         let (legs, unpriced, tape_age) = tape.open_window(&mint, lookback, signature.as_ref());
         // Missing create → NaN (unknown), same as project 1 skipping arm.
         let age = if age_gate { Some(tape_age) } else { None };
@@ -609,8 +632,9 @@ impl TradingRuntime {
             None
         } else if unpriced {
             tracing::warn!(
+                strategy = slot.name.as_str(),
                 mint = %event.mint,
-                "[04 STRAT] v071 alt-quote volume has no quote mint"
+                "[04 STRAT] tape alt-quote volume has no quote mint"
             );
             Some(f64::NAN)
         } else {
@@ -618,19 +642,21 @@ impl TradingRuntime {
                 Some(sol) => Some(sol),
                 None => {
                     tracing::warn!(
+                        strategy = slot.name.as_str(),
                         mint = %event.mint,
-                        "[04 STRAT] v071 alt-quote volume has no SOL rate"
+                        "[04 STRAT] tape alt-quote volume has no SOL rate"
                     );
                     Some(f64::NAN)
                 }
             }
         };
         tracing::info!(
+            strategy = slot.name.as_str(),
             mint = %event.mint,
             volume = volume.filter(|sol| sol.is_finite()).unwrap_or(-1.0),
             age_sec = age.filter(|sec| sec.is_finite()).unwrap_or(-1.0),
             skip_volume = !volume_gate && !sol_pair(descriptor, event),
-            "[04 STRAT] v071 tape"
+            "[04 STRAT] age/volume tape"
         );
         Some((volume, age))
     }

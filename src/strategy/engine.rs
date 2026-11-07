@@ -2,7 +2,7 @@
 
 use crate::config::{
     StrategyName, StrategyV011Config, StrategyV022Config, StrategyV031Config, StrategyV051Config,
-    StrategyV061Config, StrategyV071Config, StrategyV081Config, StrategyV101Config,
+    StrategyV061Config, StrategyV071Config, StrategyV072Config, StrategyV081Config, StrategyV101Config,
     StrategyV121Config, StrategyV131Config,
 };
 use crate::strategy::common::MarketEvent;
@@ -12,6 +12,7 @@ use crate::strategy::v031::StrategyV031Engine;
 use crate::strategy::v051::StrategyV051Engine;
 use crate::strategy::v061::StrategyV061Engine;
 use crate::strategy::v071::StrategyV071Engine;
+use crate::strategy::v072::StrategyV072Engine;
 use crate::strategy::v081::StrategyV081Engine;
 use crate::strategy::v101::StrategyV101Engine;
 use crate::strategy::v121::StrategyV121Engine;
@@ -24,6 +25,7 @@ pub enum Engine {
     V051(StrategyV051Engine),
     V061(StrategyV061Engine),
     V071(StrategyV071Engine),
+    V072(StrategyV072Engine),
     V081(StrategyV081Engine),
     V101(StrategyV101Engine),
     V121(StrategyV121Engine),
@@ -55,6 +57,10 @@ impl Engine {
         Self::V071(StrategyV071Engine::new(cfg, own_wallet))
     }
 
+    pub fn new_v072(cfg: StrategyV072Config, own_wallet: impl Into<String>) -> Self {
+        Self::V072(StrategyV072Engine::new(cfg, own_wallet))
+    }
+
     pub fn new_v081(cfg: StrategyV081Config, own_wallet: impl Into<String>) -> Self {
         Self::V081(StrategyV081Engine::new(cfg, own_wallet))
     }
@@ -79,6 +85,7 @@ impl Engine {
             Self::V051(_) => StrategyName::V051,
             Self::V061(_) => StrategyName::V061,
             Self::V071(_) => StrategyName::V071,
+            Self::V072(_) => StrategyName::V072,
             Self::V081(_) => StrategyName::V081,
             Self::V101(_) => StrategyName::V101,
             Self::V121(_) => StrategyName::V121,
@@ -98,6 +105,7 @@ impl Engine {
             Self::V051(e) => e.phase_name().to_string(),
             Self::V061(e) => e.phase_name().to_string(),
             Self::V071(e) => e.phase_name().to_string(),
+            Self::V072(e) => e.phase_name().to_string(),
             Self::V081(e) => e.phase_name().to_string(),
             Self::V101(e) => e.phase_name().to_string(),
             Self::V121(e) => e.phase_name().to_string(),
@@ -113,6 +121,7 @@ impl Engine {
             Self::V051(e) => e.needs_pool_tape(),
             Self::V061(e) => e.needs_pool_tape(),
             Self::V071(e) => e.needs_pool_tape(),
+            Self::V072(e) => e.needs_pool_tape(),
             Self::V081(e) => e.needs_pool_tape(),
             Self::V101(e) => e.needs_pool_tape(),
             Self::V121(e) => e.needs_pool_tape(),
@@ -128,6 +137,7 @@ impl Engine {
             Self::V051(e) => e.is_bound(),
             Self::V061(e) => e.is_bound(),
             Self::V071(e) => e.is_bound(),
+            Self::V072(e) => e.is_bound(),
             Self::V081(e) => e.is_bound(),
             Self::V101(e) => e.is_bound(),
             Self::V121(e) => e.is_bound(),
@@ -143,6 +153,7 @@ impl Engine {
             Self::V051(e) => e.is_done(),
             Self::V061(e) => e.is_done(),
             Self::V071(e) => e.is_done(),
+            Self::V072(e) => e.is_done(),
             Self::V081(e) => e.is_done(),
             Self::V101(e) => e.is_done(),
             Self::V121(e) => e.is_done(),
@@ -158,6 +169,7 @@ impl Engine {
             Self::V051(e) => e.last_buy_reason(),
             Self::V061(e) => e.last_buy_reason(),
             Self::V071(e) => e.last_buy_reason(),
+            Self::V072(e) => e.last_buy_reason(),
             Self::V081(e) => e.last_buy_reason(),
             Self::V101(e) => e.last_buy_reason(),
             Self::V121(e) => e.last_buy_reason(),
@@ -173,6 +185,7 @@ impl Engine {
             Self::V051(e) => e.last_sell_reason(),
             Self::V061(e) => e.last_sell_reason(),
             Self::V071(e) => e.last_sell_reason(),
+            Self::V072(e) => e.last_sell_reason(),
             Self::V081(e) => e.last_sell_reason(),
             Self::V101(e) => e.last_sell_reason(),
             Self::V121(e) => e.last_sell_reason(),
@@ -188,6 +201,7 @@ impl Engine {
             Self::V051(e) => e.buy_size_sol(),
             Self::V061(e) => e.buy_size_sol(),
             Self::V071(e) => e.buy_size_sol(),
+            Self::V072(e) => e.buy_size_sol(),
             Self::V081(e) => e.buy_size_sol(),
             Self::V101(e) => e.buy_size_sol(),
             Self::V121(e) => e.buy_size_sol(),
@@ -203,6 +217,7 @@ impl Engine {
             | Self::V051(_)
             | Self::V061(_)
             | Self::V071(_)
+            | Self::V072(_)
             | Self::V081(_)
             | Self::V101(_)
             | Self::V121(_)
@@ -233,6 +248,10 @@ impl Engine {
                 e.on_buy_fill(fill_px, now_ms);
                 None
             }
+            Self::V072(e) => {
+                e.on_buy_fill(fill_px, now_ms);
+                None
+            }
             Self::V081(e) => {
                 e.on_buy_fill(fill_px, now_ms);
                 None
@@ -260,6 +279,7 @@ impl Engine {
             Self::V051(e) => e.apply_missed_target_sell(),
             Self::V061(e) => e.apply_missed_target_sell(),
             Self::V071(e) => e.apply_missed_target_sell(),
+            Self::V072(e) => e.apply_missed_target_sell(),
             Self::V081(e) => e.apply_missed_target_sell(),
             Self::V101(e) => e.apply_missed_target_sell(),
             Self::V121(e) => e.apply_missed_target_sell(),
@@ -275,6 +295,7 @@ impl Engine {
             Self::V051(e) => e.on_buy_failed(),
             Self::V061(e) => e.on_buy_failed(),
             Self::V071(e) => e.on_buy_failed(),
+            Self::V072(e) => e.on_buy_failed(),
             Self::V081(e) => e.on_buy_failed(),
             Self::V101(e) => e.on_buy_failed(),
             Self::V121(e) => e.on_buy_failed(),
@@ -290,6 +311,7 @@ impl Engine {
             Self::V051(e) => e.on_sell_fill(),
             Self::V061(e) => e.on_sell_fill(),
             Self::V071(e) => e.on_sell_fill(),
+            Self::V072(e) => e.on_sell_fill(),
             Self::V081(e) => e.on_sell_fill(),
             Self::V101(e) => e.on_sell_fill(),
             Self::V121(e) => e.on_sell_fill(),
@@ -305,6 +327,7 @@ impl Engine {
             Self::V051(e) => e.on_sell_failed(now_ms),
             Self::V061(e) => e.on_sell_failed(now_ms),
             Self::V071(e) => e.on_sell_failed(now_ms),
+            Self::V072(e) => e.on_sell_failed(now_ms),
             Self::V081(e) => e.on_sell_failed(now_ms),
             Self::V101(e) => e.on_sell_failed(now_ms),
             Self::V121(e) => e.on_sell_failed(now_ms),
@@ -322,6 +345,7 @@ impl Engine {
             Self::V051(e) => e.restore_hold(entry_px, now_ms),
             Self::V061(e) => e.restore_hold(entry_px, now_ms),
             Self::V071(e) => e.restore_hold(entry_px, now_ms),
+            Self::V072(e) => e.restore_hold(entry_px, now_ms),
             Self::V081(e) => e.restore_hold(entry_px, now_ms),
             Self::V101(e) => e.restore_hold(entry_px, now_ms),
             Self::V121(e) => e.restore_hold(entry_px, now_ms),
@@ -348,6 +372,7 @@ impl Engine {
             Self::V051(e) => e.bind_gate(wallet, token_amount, price, now_ms),
             Self::V061(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V071(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
+            Self::V072(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V081(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V101(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V121(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
@@ -355,17 +380,21 @@ impl Engine {
         }
     }
 
-    /// Print-tape age and volume for the v071 cycle that is about to open.
+    /// Print-tape age and volume for a v071/v072 cycle that is about to open.
     pub fn set_v071_open_tape(&mut self, volume: Option<f64>, age_sec: Option<f64>) {
-        if let Self::V071(e) = self {
-            e.set_open_tape(volume, age_sec);
+        match self {
+            Self::V071(e) => e.set_open_tape(volume, age_sec),
+            Self::V072(e) => e.set_open_tape(volume, age_sec),
+            _ => {}
         }
     }
 
-    /// SOL vs alt-quote for v071 take-profit selection.
+    /// SOL vs alt-quote for v071/v072 take-profit selection.
     pub fn set_v071_sol_quote(&mut self, sol_quote: bool) {
-        if let Self::V071(e) = self {
-            e.set_sol_quote(sol_quote);
+        match self {
+            Self::V071(e) => e.set_sol_quote(sol_quote),
+            Self::V072(e) => e.set_sol_quote(sol_quote),
+            _ => {}
         }
     }
 
@@ -373,6 +402,7 @@ impl Engine {
     pub fn v071_needs_tape_refresh(&self) -> bool {
         match self {
             Self::V071(e) => e.needs_tape_refresh(),
+            Self::V072(e) => e.needs_tape_refresh(),
             _ => false,
         }
     }
@@ -390,6 +420,7 @@ impl Engine {
             Self::V051(e) => e.on_event(event),
             Self::V061(e) => e.on_event(event),
             Self::V071(e) => e.on_event(event),
+            Self::V072(e) => e.on_event(event),
             Self::V081(e) => e.on_event(event),
             Self::V101(e) => e.on_event(event),
             Self::V121(e) => e.on_event(event),
@@ -439,6 +470,12 @@ impl Engine {
                 e.on_clock(now_ms, mark_px)
             }
             Self::V071(e) => {
+                if !holding {
+                    return None;
+                }
+                e.on_clock(now_ms, mark_px)
+            }
+            Self::V072(e) => {
                 if !holding {
                     return None;
                 }
