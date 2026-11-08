@@ -12,6 +12,7 @@ pub enum StrategyName {
     V022,
     V031,
     V051,
+    V052,
     V061,
     V071,
     V072,
@@ -28,6 +29,7 @@ impl StrategyName {
             Self::V022 => "strategy_v_022",
             Self::V031 => "strategy_v_031",
             Self::V051 => "strategy_v_051",
+            Self::V052 => "strategy_v_052",
             Self::V061 => "strategy_v_061",
             Self::V071 => "strategy_v_071",
             Self::V072 => "strategy_v_072",
@@ -44,6 +46,7 @@ impl StrategyName {
             "strategy_v_022" => Some(Self::V022),
             "strategy_v_031" => Some(Self::V031),
             "strategy_v_051" => Some(Self::V051),
+            "strategy_v_052" => Some(Self::V052),
             "strategy_v_061" => Some(Self::V061),
             "strategy_v_071" => Some(Self::V071),
             "strategy_v_072" => Some(Self::V072),
@@ -240,27 +243,84 @@ pub struct StrategyV051Config {
 }
 
 impl StrategyV051Config {
-    /// Knobs from scalpingbot `config/strategy_v_051.json` (2026-10-21 walk-forward).
-    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
-    /// `max_hold_s` disable those bounds. `size_sol` is the live position size.
+    /// Knobs from scalpingbot `config/strategy_v_051.json` (2026-11-08 update).
+    /// WR 62.8% / PnL +6.36 (buy=2/1.5 sell=4/7 tp=0.25 hold=30). Zero
+    /// `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
+    /// `max_hold_s` disable those bounds. `size_sol` is the live position size
+    /// (0.6; backtest json uses 0.3).
     pub fn default_v051() -> Self {
         let mut cfg = Self {
             gate_wallet: "HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB".to_string(),
-            dust_sol: 0.3,
+            dust_sol: 0.4,
             min_entry_s: 0.0,
             max_entry_s: 8.0,
-            buy_hit_count: 3,
-            buy_hit_min: 1.0,
+            buy_hit_count: 2,
+            buy_hit_min: 1.5,
             min_mc_sol: 40.0,
-            max_mc_sol: 100.0,
-            sell_hit_count: 5,
-            sell_hit_min: 4.0,
-            take_profit: 0.3,
+            max_mc_sol: 0.0,
+            sell_hit_count: 4,
+            sell_hit_min: 7.0,
+            take_profit: 0.25,
             max_hold_s: 30.0,
             target_sell_exit: true,
             first_cycle_only: true,
             repeat_entries: true,
-            size_sol: 1.0,
+            size_sol: 0.6,
+        };
+        if cfg.buy_hit_count < 1 {
+            cfg.buy_hit_count = 1;
+        }
+        if cfg.sell_hit_count < 1 {
+            cfg.sell_hit_count = 1;
+        }
+        cfg
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyV052Config {
+    pub gate_wallet: String,
+    pub dust_sol: f64,
+    pub min_entry_s: f64,
+    pub max_entry_s: f64,
+    pub buy_hit_count: u32,
+    pub buy_hit_min: f64,
+    pub min_mc_sol: f64,
+    pub max_mc_sol: f64,
+    pub sell_hit_count: u32,
+    pub sell_hit_min: f64,
+    pub take_profit: f64,
+    pub max_hold_s: f64,
+    pub target_sell_exit: bool,
+    pub first_cycle_only: bool,
+    pub repeat_entries: bool,
+    pub size_sol: f64,
+}
+
+impl StrategyV052Config {
+    /// Knobs from scalpingbot `config/strategy_v_052.json` (2026-11-08).
+    /// Same flow as v051; hold=11, all-split WR>57% (floor-ranked; minWR 58.5).
+    /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
+    /// `max_hold_s` disable those bounds. `size_sol` is the live position size
+    /// (0.6; backtest json uses 0.3).
+    pub fn default_v052() -> Self {
+        let mut cfg = Self {
+            gate_wallet: "HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB".to_string(),
+            dust_sol: 0.4,
+            min_entry_s: 0.0,
+            max_entry_s: 8.0,
+            buy_hit_count: 3,
+            buy_hit_min: 2.0,
+            min_mc_sol: 50.0,
+            max_mc_sol: 0.0,
+            sell_hit_count: 9,
+            sell_hit_min: 7.0,
+            take_profit: 0.3,
+            max_hold_s: 11.0,
+            target_sell_exit: true,
+            first_cycle_only: true,
+            repeat_entries: true,
+            size_sol: 0.6,
         };
         if cfg.buy_hit_count < 1 {
             cfg.buy_hit_count = 1;
@@ -454,7 +514,7 @@ impl StrategyV072Config {
     /// `max_mc_sol`, `target_volume_s`, `min_target_volume_sol`,
     /// `max_target_volume_sol`, `min_target_age_s`, `max_target_age_s`, and
     /// `max_hold_s` disable those bounds. `size_sol` is the live position size
-    /// (0.6; backtest json uses 0.3).
+    /// (0.5; backtest json uses 0.3).
     pub fn default_v072() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
@@ -475,7 +535,7 @@ impl StrategyV072Config {
             second_buy_exit: false,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.6,
+            size_sol: 0.5,
         };
         if cfg.target_volume_s < 0.0 {
             cfg.target_volume_s = 0.0;
@@ -829,6 +889,7 @@ pub struct AppConfig {
     pub strategy_v022: StrategyV022Config,
     pub strategy_v031: StrategyV031Config,
     pub strategy_v051: StrategyV051Config,
+    pub strategy_v052: StrategyV052Config,
     pub strategy_v061: StrategyV061Config,
     pub strategy_v071: StrategyV071Config,
     pub strategy_v072: StrategyV072Config,
@@ -914,6 +975,7 @@ pub fn load_config() -> Result<AppConfig> {
     let strategy_v022 = StrategyV022Config::default_v022();
     let strategy_v031 = StrategyV031Config::default_v031();
     let strategy_v051 = StrategyV051Config::default_v051();
+    let strategy_v052 = StrategyV052Config::default_v052();
     let strategy_v061 = StrategyV061Config::default_v061();
     let strategy_v071 = StrategyV071Config::default_v071();
     let strategy_v072 = StrategyV072Config::default_v072();
@@ -929,6 +991,7 @@ pub fn load_config() -> Result<AppConfig> {
             &strategy_v022,
             &strategy_v031,
             &strategy_v051,
+            &strategy_v052,
             &strategy_v061,
             &strategy_v071,
             &strategy_v072,
@@ -951,6 +1014,7 @@ pub fn load_config() -> Result<AppConfig> {
         strategy_v022,
         strategy_v031,
         strategy_v051,
+        strategy_v052,
         strategy_v061,
         strategy_v071,
         strategy_v072,
@@ -995,6 +1059,7 @@ fn quote_pairs_setting(name: StrategyName) -> &'static str {
         StrategyName::V022 => settings::STRATEGY_V_022_QUOTE_PAIRS,
         StrategyName::V031 => settings::STRATEGY_V_031_QUOTE_PAIRS,
         StrategyName::V051 => settings::STRATEGY_V_051_QUOTE_PAIRS,
+        StrategyName::V052 => settings::STRATEGY_V_052_QUOTE_PAIRS,
         StrategyName::V061 => settings::STRATEGY_V_061_QUOTE_PAIRS,
         StrategyName::V071 => settings::STRATEGY_V_071_QUOTE_PAIRS,
         StrategyName::V072 => settings::STRATEGY_V_072_QUOTE_PAIRS,
@@ -1025,6 +1090,7 @@ fn build_plan(
     v022: &StrategyV022Config,
     v031: &StrategyV031Config,
     v051: &StrategyV051Config,
+    v052: &StrategyV052Config,
     v061: &StrategyV061Config,
     v071: &StrategyV071Config,
     v072: &StrategyV072Config,
@@ -1062,6 +1128,13 @@ fn build_plan(
             0.0,
             v051.target_sell_exit,
             v051.first_cycle_only,
+        ),
+        StrategyName::V052 => (
+            v052.gate_wallet.clone(),
+            v052.size_sol,
+            0.0,
+            v052.target_sell_exit,
+            v052.first_cycle_only,
         ),
         StrategyName::V061 => (
             v061.gate_wallet.clone(),
@@ -1152,6 +1225,10 @@ fn resolve_trading_keypair(name: StrategyName) -> Result<Keypair> {
         StrategyName::V051 => (
             settings::STRATEGY_V_051_PRIVATE_KEY_ENCRYPTED,
             settings::STRATEGY_V_051_PRIVATE_KEY_BASE58,
+        ),
+        StrategyName::V052 => (
+            settings::STRATEGY_V_052_PRIVATE_KEY_ENCRYPTED,
+            settings::STRATEGY_V_052_PRIVATE_KEY_BASE58,
         ),
         StrategyName::V061 => (
             settings::STRATEGY_V_061_PRIVATE_KEY_ENCRYPTED,

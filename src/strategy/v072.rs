@@ -762,7 +762,7 @@ mod tests {
         assert!(loaded.target_sell_exit);
         assert!(!loaded.second_buy_exit);
         assert!(!loaded.repeat_entries);
-        assert_eq!(loaded.size_sol, 0.6);
+        assert_eq!(loaded.size_sol, 0.5);
     }
 
     #[test]

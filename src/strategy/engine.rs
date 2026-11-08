@@ -1,7 +1,7 @@
 //! Unified strategy engine wrapper for runtime / execution / state.
 
 use crate::config::{
-    StrategyName, StrategyV011Config, StrategyV022Config, StrategyV031Config, StrategyV051Config,
+    StrategyName, StrategyV011Config, StrategyV022Config, StrategyV031Config, StrategyV051Config, StrategyV052Config,
     StrategyV061Config, StrategyV071Config, StrategyV072Config, StrategyV081Config, StrategyV101Config,
     StrategyV121Config, StrategyV131Config,
 };
@@ -10,6 +10,7 @@ use crate::strategy::v011::{Decision, StrategyV011Engine};
 use crate::strategy::v022::StrategyV022Engine;
 use crate::strategy::v031::StrategyV031Engine;
 use crate::strategy::v051::StrategyV051Engine;
+use crate::strategy::v052::StrategyV052Engine;
 use crate::strategy::v061::StrategyV061Engine;
 use crate::strategy::v071::StrategyV071Engine;
 use crate::strategy::v072::StrategyV072Engine;
@@ -23,6 +24,7 @@ pub enum Engine {
     V022(StrategyV022Engine),
     V031(StrategyV031Engine),
     V051(StrategyV051Engine),
+    V052(StrategyV052Engine),
     V061(StrategyV061Engine),
     V071(StrategyV071Engine),
     V072(StrategyV072Engine),
@@ -47,6 +49,10 @@ impl Engine {
 
     pub fn new_v051(cfg: StrategyV051Config, own_wallet: impl Into<String>) -> Self {
         Self::V051(StrategyV051Engine::new(cfg, own_wallet))
+    }
+
+    pub fn new_v052(cfg: StrategyV052Config, own_wallet: impl Into<String>) -> Self {
+        Self::V052(StrategyV052Engine::new(cfg, own_wallet))
     }
 
     pub fn new_v061(cfg: StrategyV061Config, own_wallet: impl Into<String>) -> Self {
@@ -83,6 +89,7 @@ impl Engine {
             Self::V022(_) => StrategyName::V022,
             Self::V031(_) => StrategyName::V031,
             Self::V051(_) => StrategyName::V051,
+            Self::V052(_) => StrategyName::V052,
             Self::V061(_) => StrategyName::V061,
             Self::V071(_) => StrategyName::V071,
             Self::V072(_) => StrategyName::V072,
@@ -103,6 +110,7 @@ impl Engine {
             Self::V022(e) => e.phase_name().to_string(),
             Self::V031(e) => e.phase_name().to_string(),
             Self::V051(e) => e.phase_name().to_string(),
+            Self::V052(e) => e.phase_name().to_string(),
             Self::V061(e) => e.phase_name().to_string(),
             Self::V071(e) => e.phase_name().to_string(),
             Self::V072(e) => e.phase_name().to_string(),
@@ -119,6 +127,7 @@ impl Engine {
             Self::V022(e) => e.needs_pool_tape(),
             Self::V031(e) => e.needs_pool_tape(),
             Self::V051(e) => e.needs_pool_tape(),
+            Self::V052(e) => e.needs_pool_tape(),
             Self::V061(e) => e.needs_pool_tape(),
             Self::V071(e) => e.needs_pool_tape(),
             Self::V072(e) => e.needs_pool_tape(),
@@ -135,6 +144,7 @@ impl Engine {
             Self::V022(e) => e.is_bound(),
             Self::V031(e) => e.is_bound(),
             Self::V051(e) => e.is_bound(),
+            Self::V052(e) => e.is_bound(),
             Self::V061(e) => e.is_bound(),
             Self::V071(e) => e.is_bound(),
             Self::V072(e) => e.is_bound(),
@@ -151,6 +161,7 @@ impl Engine {
             Self::V022(_) => false,
             Self::V031(e) => e.is_done(),
             Self::V051(e) => e.is_done(),
+            Self::V052(e) => e.is_done(),
             Self::V061(e) => e.is_done(),
             Self::V071(e) => e.is_done(),
             Self::V072(e) => e.is_done(),
@@ -167,6 +178,7 @@ impl Engine {
             Self::V022(e) => e.last_buy_reason(),
             Self::V031(e) => e.last_buy_reason(),
             Self::V051(e) => e.last_buy_reason(),
+            Self::V052(e) => e.last_buy_reason(),
             Self::V061(e) => e.last_buy_reason(),
             Self::V071(e) => e.last_buy_reason(),
             Self::V072(e) => e.last_buy_reason(),
@@ -183,6 +195,7 @@ impl Engine {
             Self::V022(e) => e.last_sell_reason(),
             Self::V031(e) => e.last_sell_reason(),
             Self::V051(e) => e.last_sell_reason(),
+            Self::V052(e) => e.last_sell_reason(),
             Self::V061(e) => e.last_sell_reason(),
             Self::V071(e) => e.last_sell_reason(),
             Self::V072(e) => e.last_sell_reason(),
@@ -199,6 +212,7 @@ impl Engine {
             Self::V022(e) => e.buy_size_sol(),
             Self::V031(e) => e.buy_size_sol(),
             Self::V051(e) => e.buy_size_sol(),
+            Self::V052(e) => e.buy_size_sol(),
             Self::V061(e) => e.buy_size_sol(),
             Self::V071(e) => e.buy_size_sol(),
             Self::V072(e) => e.buy_size_sol(),
@@ -215,6 +229,7 @@ impl Engine {
             Self::V022(_)
             | Self::V031(_)
             | Self::V051(_)
+            | Self::V052(_)
             | Self::V061(_)
             | Self::V071(_)
             | Self::V072(_)
@@ -237,6 +252,10 @@ impl Engine {
                 None
             }
             Self::V051(e) => {
+                e.on_buy_fill(fill_px, now_ms);
+                None
+            }
+            Self::V052(e) => {
                 e.on_buy_fill(fill_px, now_ms);
                 None
             }
@@ -277,6 +296,7 @@ impl Engine {
             Self::V022(e) => e.apply_missed_target_sell(),
             Self::V031(e) => e.apply_missed_target_sell(),
             Self::V051(e) => e.apply_missed_target_sell(),
+            Self::V052(e) => e.apply_missed_target_sell(),
             Self::V061(e) => e.apply_missed_target_sell(),
             Self::V071(e) => e.apply_missed_target_sell(),
             Self::V072(e) => e.apply_missed_target_sell(),
@@ -293,6 +313,7 @@ impl Engine {
             Self::V022(e) => e.on_buy_failed(),
             Self::V031(e) => e.on_buy_failed(),
             Self::V051(e) => e.on_buy_failed(),
+            Self::V052(e) => e.on_buy_failed(),
             Self::V061(e) => e.on_buy_failed(),
             Self::V071(e) => e.on_buy_failed(),
             Self::V072(e) => e.on_buy_failed(),
@@ -309,6 +330,7 @@ impl Engine {
             Self::V022(e) => e.on_sell_fill(),
             Self::V031(e) => e.on_sell_fill(),
             Self::V051(e) => e.on_sell_fill(),
+            Self::V052(e) => e.on_sell_fill(),
             Self::V061(e) => e.on_sell_fill(),
             Self::V071(e) => e.on_sell_fill(),
             Self::V072(e) => e.on_sell_fill(),
@@ -325,6 +347,7 @@ impl Engine {
             Self::V022(e) => e.on_sell_failed(now_ms),
             Self::V031(e) => e.on_sell_failed(now_ms),
             Self::V051(e) => e.on_sell_failed(now_ms),
+            Self::V052(e) => e.on_sell_failed(now_ms),
             Self::V061(e) => e.on_sell_failed(now_ms),
             Self::V071(e) => e.on_sell_failed(now_ms),
             Self::V072(e) => e.on_sell_failed(now_ms),
@@ -343,6 +366,7 @@ impl Engine {
             Self::V022(e) => e.restore_hold(entry_px),
             Self::V031(e) => e.restore_hold(entry_px, now_ms),
             Self::V051(e) => e.restore_hold(entry_px, now_ms),
+            Self::V052(e) => e.restore_hold(entry_px, now_ms),
             Self::V061(e) => e.restore_hold(entry_px, now_ms),
             Self::V071(e) => e.restore_hold(entry_px, now_ms),
             Self::V072(e) => e.restore_hold(entry_px, now_ms),
@@ -370,6 +394,7 @@ impl Engine {
             Self::V022(e) => e.bind_gate(wallet, token_amount),
             Self::V031(e) => e.bind_gate(wallet, token_amount, price, now_ms),
             Self::V051(e) => e.bind_gate(wallet, token_amount, price, now_ms),
+            Self::V052(e) => e.bind_gate(wallet, token_amount, price, now_ms),
             Self::V061(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V071(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
             Self::V072(e) => e.bind_gate(wallet, token_amount, price, sol, now_ms),
@@ -418,6 +443,7 @@ impl Engine {
             Self::V022(e) => e.on_event(event),
             Self::V031(e) => e.on_event(event),
             Self::V051(e) => e.on_event(event),
+            Self::V052(e) => e.on_event(event),
             Self::V061(e) => e.on_event(event),
             Self::V071(e) => e.on_event(event),
             Self::V072(e) => e.on_event(event),
@@ -458,6 +484,12 @@ impl Engine {
                 e.on_clock(now_ms, mark_px)
             }
             Self::V051(e) => {
+                if !holding {
+                    return None;
+                }
+                e.on_clock(now_ms, mark_px)
+            }
+            Self::V052(e) => {
                 if !holding {
                     return None;
                 }
