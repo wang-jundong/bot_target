@@ -33,7 +33,13 @@ struct StrategySlot {
     tokens: Mutex<HashMap<String, Arc<Mutex<TokenInner>>>>,
     busy: Mutex<HashSet<String>>,
     pending_sells: Mutex<HashMap<String, String>>,
+    /// Mints that finished a `first_cycle_only` run — do not re-arm.
+    finished_mints: Mutex<HashSet<String>>,
 }
+
+/// Pool gRPC registration: mint pubkey, strategy holders, generation epoch.
+/// Epoch bumps on every re-subscribe so a stale Unregister cannot drop a newer watch.
+type PoolRegistration = (Pubkey, HashSet<&'static str>, u64);
 
 pub struct TradingRuntime {
     config: Arc<AppConfig>,
@@ -45,8 +51,8 @@ pub struct TradingRuntime {
     /// Age is firehose pump-create Instant stamps (no birth RPC).
     tape: Option<Arc<V071Tape>>,
     slots: Vec<Arc<StrategySlot>>,
-    /// program:pool → (mint, set of slot names still needing the tape)
-    registered: Mutex<HashMap<String, (Pubkey, HashSet<&'static str>)>>,
+    /// program:pool → (mint, holders, epoch)
+    registered: Mutex<HashMap<String, PoolRegistration>>,
     inbound: Mutex<Option<mpsc::Receiver<crate::events::ParsedTargetTransaction>>>,
     received: std::sync::atomic::AtomicU64,
     decoded: std::sync::atomic::AtomicU64,
@@ -79,6 +85,7 @@ impl TradingRuntime {
                     tokens: Mutex::new(HashMap::new()),
                     busy: Mutex::new(HashSet::new()),
                     pending_sells: Mutex::new(HashMap::new()),
+                    finished_mints: Mutex::new(HashSet::new()),
                 })
             })
             .collect();
@@ -201,7 +208,11 @@ impl TradingRuntime {
                     )
                 };
                 if changed {
-                    self.sync_pool_need(slot, &key, needed).await;
+                    let descriptor = token.lock().await.descriptor.clone();
+                    self.sync_pool_need(slot, &key, needed, &descriptor).await;
+                    if !needed {
+                        self.maybe_drop_idle_token(slot, &key).await;
+                    }
                 }
                 if let Some(signal) = signal {
                     tracing::info!(strategy, mint_key = %key, signal, "[04 STRAT] clock decision");
@@ -335,6 +346,20 @@ impl TradingRuntime {
         let token = if let Some(token) = existing {
             token
         } else if event.trader == slot.target_wallet && event.side == Side::Buy {
+            if slot.first_cycle_only
+                && slot
+                    .finished_mints
+                    .lock()
+                    .await
+                    .contains(&descriptor.mint)
+            {
+                tracing::info!(
+                    strategy = slot.name.as_str(),
+                    mint = %descriptor.mint,
+                    "[03 DETECT] Skipping mint; first_cycle_only already finished"
+                );
+                return Ok(false);
+            }
             let quote_mint = pair_quote_mint(descriptor, event);
             if let Some(code) = slot.quote_pairs.rejects(quote_mint) {
                 tracing::info!(
@@ -417,18 +442,22 @@ impl TradingRuntime {
                 let gate = event.signature == state.target_buy.signature
                     && event.event_index == state.target_buy.event_index;
                 let target_buy = event.trader == slot.target_wallet && event.side == Side::Buy;
+                let phase = state.engine.phase_name();
+                // New cycle open only from idle (or first bind). An add-on target
+                // buy while seek/hold must not rewrite the frozen open window.
+                let new_cycle_open = target_buy && (phase == "idle" || !state.engine.is_bound());
                 // Re-sample while seeking with a blocked tape so background
                 // Jupiter FX (volume) can unlock without awaiting on detect.
                 let retry_blocked = state.engine.v071_needs_tape_refresh();
-                let should = !gate && (!state.engine.is_bound() || target_buy || retry_blocked);
+                let should =
+                    !gate && (new_cycle_open || retry_blocked || !state.engine.is_bound());
                 if !should {
                     None
-                } else if target_buy {
-                    // New cycle opens on this target buy — freeze to this print.
+                } else if new_cycle_open {
+                    // Freeze age/volume to the buy that opens this cycle.
                     Some((event.signature.clone(), event.timestamp_ms))
                 } else {
-                    // FX retry (or late bind): keep the recorded gate buy so a
-                    // later pool print cannot inflate age/volume.
+                    // FX retry / late bind: keep the recorded cycle-open buy.
                     Some((
                         state.target_buy.signature.clone(),
                         state.target_buy.timestamp_ms,
@@ -480,7 +509,10 @@ impl TradingRuntime {
                 state.pool_tape_needed = Some(needed);
                 drop(state);
                 if changed {
-                    self.sync_pool_need(slot, &key, needed).await;
+                    self.sync_pool_need(slot, &key, needed, descriptor).await;
+                    if !needed {
+                        self.maybe_drop_idle_token(slot, &key).await;
+                    }
                 }
                 return Ok(false);
             }
@@ -504,6 +536,15 @@ impl TradingRuntime {
             let is_holding = holding(&state);
             let signal = state.engine.on_event(&market, is_holding);
             let after = state.engine.phase_name();
+            // Advance the cycle-open marker after idle→seek so later FX retries
+            // freeze to this buy — not the first bind forever.
+            if before == "idle"
+                && after == "seek_sell"
+                && market.side == "BUY"
+                && market.wallet == slot.target_wallet
+            {
+                state.target_buy = event.clone();
+            }
             let cycle_ended = after == "idle" || after == "done";
             if before == "pending"
                 && cycle_ended
@@ -526,7 +567,10 @@ impl TradingRuntime {
             )
         };
         if changed {
-            self.sync_pool_need(slot, &key, needed).await;
+            self.sync_pool_need(slot, &key, needed, descriptor).await;
+            if !needed {
+                self.maybe_drop_idle_token(slot, &key).await;
+            }
         }
         if let Some(signal) = signal {
             tracing::info!(strategy, mint = %descriptor.mint, signal, "[04 STRAT] decision");
@@ -694,21 +738,53 @@ impl TradingRuntime {
             let mut registered = self.registered.lock().await;
             let entry = registered
                 .entry(key.to_string())
-                .or_insert_with(|| (Pubkey::default(), HashSet::new()));
+                .or_insert_with(|| (Pubkey::default(), HashSet::new(), 0));
+            entry.2 = entry.2.wrapping_add(1);
             entry.1.insert(slot.name.as_str());
         }
         self.enqueue_subscribe(descriptor.clone());
     }
 
-    async fn sync_pool_need(self: &Arc<Self>, slot: &StrategySlot, key: &str, needed: bool) {
-        let should_unsubscribe = {
-            let mut registered = self.registered.lock().await;
-            if needed {
-                if let Some((_, holders)) = registered.get_mut(key) {
+    /// Keep the pool gRPC filter aligned with `needs_pool_tape`.
+    ///
+    /// Idle / done drops the holder and may Unregister. A later cycle reopen
+    /// (target rebuy after max-sell) must create the registration again —
+    /// inserting into a missing map entry is not enough; that left cycle-2
+    /// seek deaf to curve prints on A17dh… / similar mints.
+    async fn sync_pool_need(
+        self: &Arc<Self>,
+        slot: &StrategySlot,
+        key: &str,
+        needed: bool,
+        descriptor: &crate::events::PoolDescriptor,
+    ) {
+        if needed {
+            let (missing, needs_resub) = {
+                let registered = self.registered.lock().await;
+                match registered.get(key) {
+                    None => (true, false),
+                    // Holders exist but Register never landed (or was wiped).
+                    Some((mint, _, _)) if *mint == Pubkey::default() => (false, true),
+                    Some(_) => (false, false),
+                }
+            };
+            if missing {
+                self.mark_pool_needed(slot, key, descriptor).await;
+            } else {
+                let mut registered = self.registered.lock().await;
+                if let Some((_, holders, _)) = registered.get_mut(key) {
                     holders.insert(slot.name.as_str());
                 }
-                false
-            } else if let Some((_, holders)) = registered.get_mut(key) {
+                if needs_resub {
+                    drop(registered);
+                    self.enqueue_subscribe(descriptor.clone());
+                }
+            }
+            return;
+        }
+        let should_unsubscribe = {
+            let mut registered = self.registered.lock().await;
+            if let Some((_, holders, _)) = registered.get_mut(key) {
                 holders.remove(slot.name.as_str());
                 holders.is_empty()
             } else {
@@ -722,6 +798,51 @@ impl TradingRuntime {
                 runtime.release_pool(&key).await;
             });
         }
+    }
+
+    /// Drop flat idle/done token state so long runs do not retain every mint.
+    /// Next target buy recreates via the fresh-bind path (and re-subscribes).
+    ///
+    /// Never drop `wait`: that phase means "done with this entry clock" while the
+    /// target bag may still be open. Dropping it would let an add-on target buy
+    /// recreate the engine and re-arm mid-bag (wrong after TP / expire).
+    async fn maybe_drop_idle_token(&self, slot: &StrategySlot, key: &str) {
+        if slot.busy.lock().await.contains(key) {
+            return;
+        }
+        if slot.pending_sells.lock().await.contains_key(key) {
+            return;
+        }
+        let mut tokens = slot.tokens.lock().await;
+        let Some(token) = tokens.get(key).cloned() else {
+            return;
+        };
+        let state = token.lock().await;
+        if holding(&state) || state.buy_send_claimed || state.sell_send_claimed {
+            return;
+        }
+        if state.engine.needs_pool_tape() {
+            return;
+        }
+        let phase = state.engine.phase_name();
+        if !matches!(phase.as_str(), "idle" | "done") {
+            return;
+        }
+        let mint = state.descriptor.mint.clone();
+        let finished = phase == "done" || state.engine.is_done();
+        drop(state);
+        tokens.remove(key);
+        drop(tokens);
+        if finished && slot.first_cycle_only {
+            slot.finished_mints.lock().await.insert(mint.clone());
+        }
+        tracing::info!(
+            strategy = slot.name.as_str(),
+            %key,
+            mint = %mint,
+            phase,
+            "[03 DETECT] Dropped idle token state"
+        );
     }
 
     async fn claim_busy(&self, slot: &StrategySlot, key: &str) -> bool {
@@ -779,6 +900,18 @@ impl TradingRuntime {
                     .await
                     .insert(key.to_string(), sell_reason.to_string());
                 tracing::info!(%key, reason = sell_reason, "[08 EXIT] Queued sell while busy");
+            } else if signal == "BUY" {
+                // Only unwind `pending` when no buy send owns the claim — a
+                // concurrent BUY while buy_inner is in flight must not fail it.
+                let mut state = token.lock().await;
+                if !state.buy_send_claimed && state.engine.phase_name() == "pending" {
+                    state.engine.on_buy_failed();
+                    tracing::warn!(
+                        %key,
+                        reason = buy_reason,
+                        "[05 ENTRY] Buy dropped while busy; reseek"
+                    );
+                }
             }
             return;
         }
@@ -903,6 +1036,7 @@ impl TradingRuntime {
             if state.lifecycle == Lifecycle::BuyPrepared {
                 let _ = state.transition(Lifecycle::TrackingPool);
             }
+            return false;
         }
         true
     }
@@ -977,7 +1111,7 @@ impl TradingRuntime {
         {
             let reg = self.registered.lock().await;
             // `Pubkey::default()` means holders exist but Register has not been sent yet.
-            if let Some((existing, _)) = reg.get(&key) {
+            if let Some((existing, _, _)) = reg.get(&key) {
                 if *existing == mint {
                     return Ok(());
                 }
@@ -1050,12 +1184,18 @@ impl TradingRuntime {
         };
         send?;
         let mut reg = self.registered.lock().await;
-        if let Some((stored, holders)) = reg.get_mut(&key) {
+        if let Some((stored, holders, _)) = reg.get_mut(&key) {
             *stored = mint;
             let _ = holders;
-        } else {
-            reg.insert(key, (mint, HashSet::new()));
+            return Ok(());
         }
+        drop(reg);
+        // Released while Subscribe was in flight — undo the Register we just sent.
+        let _ = self
+            .geyser
+            .commands
+            .send(GeyserCommand::Unregister { mint })
+            .await;
         Ok(())
     }
 
@@ -1086,7 +1226,7 @@ impl TradingRuntime {
     }
 
     async fn release_pool(&self, key: &str) {
-        let Some((mint, holders)) = self.registered.lock().await.remove(key) else {
+        let Some((mint, holders, epoch)) = self.registered.lock().await.remove(key) else {
             return;
         };
         if !holders.is_empty() {
@@ -1094,13 +1234,21 @@ impl TradingRuntime {
             self.registered
                 .lock()
                 .await
-                .insert(key.to_string(), (mint, holders));
+                .insert(key.to_string(), (mint, holders, epoch));
             return;
         }
         if mint == Pubkey::default() {
             return;
         }
+        // Cycle reopen may have mark_pool_needed'd after our remove (newer
+        // epoch in the map). Do not Unregister a live watch.
+        if self.registered.lock().await.contains_key(key) {
+            return;
+        }
         self.abandon_alt_quotes(key).await;
+        if self.registered.lock().await.contains_key(key) {
+            return;
+        }
         if let Err(err) = self
             .geyser
             .commands
@@ -1110,7 +1258,7 @@ impl TradingRuntime {
             tracing::warn!(error = %err, %key, "[02 STREAM] Failed to unregister pool from geyser");
             return;
         }
-        tracing::info!(%key, "[02 STREAM] Released pool from gRPC filter");
+        tracing::info!(%key, epoch, "[02 STREAM] Released pool from gRPC filter");
     }
 
     /// No slot still needs the tape. If a wallet is flat, swap leftover quote now and again in 8s.
@@ -1393,8 +1541,9 @@ impl TradingRuntime {
                 let mut registered = self.registered.lock().await;
                 let entry = registered
                     .entry(key.clone())
-                    .or_insert_with(|| (mint, HashSet::new()));
+                    .or_insert_with(|| (mint, HashSet::new(), 0));
                 entry.0 = mint;
+                entry.2 = entry.2.wrapping_add(1);
                 entry.1.insert(slot.name.as_str());
             }
             slot.tokens
@@ -1413,7 +1562,7 @@ impl TradingRuntime {
             .lock()
             .await
             .drain()
-            .filter_map(|(_, (mint, _))| {
+            .filter_map(|(_, (mint, _, _))| {
                 if mint == Pubkey::default() {
                     None
                 } else {
