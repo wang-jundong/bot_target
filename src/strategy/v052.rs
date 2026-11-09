@@ -620,7 +620,7 @@ mod tests {
         assert!(loaded.first_cycle_only);
         assert!(loaded.target_sell_exit);
         assert!(loaded.repeat_entries);
-        assert_eq!(loaded.size_sol, 0.6);
+        assert_eq!(loaded.size_sol, 0.5);
     }
 
     #[test]

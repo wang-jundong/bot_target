@@ -1799,7 +1799,7 @@ impl LiveExecution {
         let flush = async move { journal.record_critical(sent_record).await };
         let ((), confirmed) = tokio::join!(
             flush,
-            self.confirm(token, &signature, &mint, &venue, fallback)
+            self.confirm(token, &signature, &mint, &venue, fallback, is_buy)
         );
         let (token_amount, sol_amount, price) = confirmed?;
         if is_buy && token_amount == 0 {
@@ -2134,12 +2134,13 @@ impl LiveExecution {
         mint: &str,
         venue: &str,
         fallback: bool,
+        is_buy: bool,
     ) -> Result<(u64, u64, f64)> {
         // If status was seen but fill lagged, re-poll up to 3 outer rounds.
         let mut last_err = anyhow!("confirmation timed out for {signature}");
         for poll in 1..=3 {
             match self
-                .wait_processed(token, signature, mint, venue, fallback)
+                .wait_processed(token, signature, mint, venue, fallback, is_buy)
                 .await
             {
                 Ok(fill) => return Ok(fill),
@@ -2170,11 +2171,16 @@ impl LiveExecution {
         mint: &str,
         venue: &str,
         fallback: bool,
+        is_buy: bool,
     ) -> Result<(u64, u64, f64)> {
         let signature_parsed = Signature::from_str(signature)?;
         let started = Instant::now();
         let deadline = Duration::from_secs(30);
-        let unseen_deadline = if fallback {
+        // Sells: abort quickly if the sig never appears so the attempt loop can
+        // rebuild/resend. Buys keep the slower unseen window (Sender can lag).
+        let unseen_deadline = if !is_buy {
+            Duration::from_secs(5)
+        } else if fallback {
             Duration::from_secs(10)
         } else {
             deadline
@@ -2241,6 +2247,13 @@ impl LiveExecution {
                     }
                 }
             } else if !seen && started.elapsed() >= unseen_deadline {
+                if !is_buy {
+                    tracing::warn!(
+                        signature,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "[06 CONFIRM] Sell unseen; aborting confirm to retry"
+                    );
+                }
                 break;
             }
             tokio::select! {

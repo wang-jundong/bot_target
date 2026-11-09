@@ -301,8 +301,7 @@ impl StrategyV052Config {
     /// Knobs from scalpingbot `config/strategy_v_052.json` (2026-11-08).
     /// Same flow as v051; hold=11, all-split WR>57% (floor-ranked; minWR 58.5).
     /// Zero `min_entry_s`, `max_entry_s`, `min_mc_sol`, `max_mc_sol`, and
-    /// `max_hold_s` disable those bounds. `size_sol` is the live position size
-    /// (0.6; backtest json uses 0.3).
+    /// `max_hold_s` disable those bounds. `size_sol` matches that config.
     pub fn default_v052() -> Self {
         let mut cfg = Self {
             gate_wallet: "HSeCG7T2KCTuVAARGXZuxBNZg6pas1EdJdjn7Xyy1ENB".to_string(),
@@ -320,7 +319,7 @@ impl StrategyV052Config {
             target_sell_exit: true,
             first_cycle_only: true,
             repeat_entries: true,
-            size_sol: 0.6,
+            size_sol: 0.5,
         };
         if cfg.buy_hit_count < 1 {
             cfg.buy_hit_count = 1;
@@ -425,7 +424,7 @@ impl StrategyV071Config {
     /// `buy_pressure_s`, `max_buy_pressure`, `target_volume_s`,
     /// `min_target_volume_sol`, `max_target_volume_sol`, `min_target_age_s`,
     /// `max_target_age_s`, and `max_hold_s` disable those bounds.
-    /// `size_sol` is the live position size.
+    /// `size_sol` matches that config.
     pub fn default_v071() -> Self {
         let mut cfg = Self {
             gate_wallet: "3PwXa9BRA2sUdjtcGxs4bVLBau2dHTuZwtb6CbpTpdvA".to_string(),
@@ -452,7 +451,7 @@ impl StrategyV071Config {
             second_buy_exit: false,
             first_cycle_only: false,
             repeat_entries: false,
-            size_sol: 0.6,
+            size_sol: 0.5,
         };
         if cfg.sell_hit_count < 1 {
             cfg.sell_hit_count = 1;
