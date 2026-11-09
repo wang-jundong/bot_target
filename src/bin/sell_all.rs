@@ -130,14 +130,45 @@ Matches live non-SOL exits:\n\
                 } else {
                     None
                 };
+                let cu_base = config.compute_unit_limit.max(400_000);
                 if pump.is_none() && launchpad.is_none() {
-                    println!("skip {mint_str} reason=no pump/launchlab pool");
+                    // Explicit --mint: bag may sit on Raydium/Orca/Manifest/etc.
                     if only.iter().any(|m| m == mint_str) {
-                        failed += 1;
+                        println!(
+                            "sell {mint_str} amount={amount} venue=jupiter-flatten{}",
+                            if dry_run { " dry-run" } else { "" }
+                        );
+                        if dry_run {
+                            continue;
+                        }
+                        let cu = cu_base.max(ALT_COMPUTE_UNIT_LIMIT);
+                        match sell_jupiter_flatten(
+                            &rpc,
+                            &sender,
+                            &quotes,
+                            &owner,
+                            &plan.keypair,
+                            &mint,
+                            amount,
+                            cu,
+                            config.priority_fee_lamports,
+                            config.helius_tip_lamports,
+                        )
+                        .await
+                        {
+                            Ok(signature) => {
+                                println!("ok mint={mint_str} signature={signature}");
+                            }
+                            Err(err) => {
+                                failed += 1;
+                                println!("fail mint={mint_str} error={err}");
+                            }
+                        }
+                        continue;
                     }
+                    println!("skip {mint_str} reason=no pump/launchlab pool");
                     continue;
                 }
-                let cu_base = config.compute_unit_limit.max(400_000);
                 let result = if let Some((complete, curve)) = pump {
                     let alt_quote = curve
                         .quote_mint
